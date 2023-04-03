@@ -103,7 +103,7 @@ If this flag is passed, the behavior can still be set to not abort through
 ### `--allow-child-process`
 
 <!-- YAML
-added: REPLACEME
+added: v20.0.0
 -->
 
 > Stability: 1 - Experimental
@@ -144,7 +144,7 @@ Error: Access to this API has been restricted
 ### `--allow-fs-read`
 
 <!-- YAML
-added: REPLACEME
+added: v20.0.0
 -->
 
 > Stability: 1 - Experimental
@@ -190,7 +190,7 @@ $ node --experimental-permission --allow-fs-read=/path/to/index.js index.js
 ### `--allow-fs-write`
 
 <!-- YAML
-added: REPLACEME
+added: v20.0.0
 -->
 
 > Stability: 1 - Experimental
@@ -210,7 +210,7 @@ Relative paths are NOT supported through the CLI flag.
 ### `--allow-worker`
 
 <!-- YAML
-added: REPLACEME
+added: v20.0.0
 -->
 
 > Stability: 1 - Experimental
@@ -537,7 +537,7 @@ Enable experimental support for the `https:` protocol in `import` specifiers.
 ### `--experimental-permission`
 
 <!-- YAML
-added: REPLACEME
+added: v20.0.0
 -->
 
 Enable the Permission Model for current process. When enabled, the
@@ -626,7 +626,7 @@ added:
   - v13.3.0
   - v12.16.0
 changes:
-  - version: REPLACEME
+  - version: v20.0.0
     pr-url: https://github.com/nodejs/node/pull/47286
     description: This option is no longer required as WASI is
                  enabled by default, but can still be passed.
@@ -1400,7 +1400,7 @@ added:
   - v18.1.0
   - v16.17.0
 changes:
-  - version: REPLACEME
+  - version: v20.0.0
     pr-url: https://github.com/nodejs/node/pull/46983
     description: The test runner is now stable.
   - version:
@@ -1420,7 +1420,7 @@ for more details.
 <!-- YAML
 added: v18.11.0
 changes:
-  - version: REPLACEME
+  - version: v20.0.0
     pr-url: https://github.com/nodejs/node/pull/46983
     description: The test runner is now stable.
 -->
@@ -1436,7 +1436,7 @@ added:
   - v19.6.0
   - v18.15.0
 changes:
-  - version: REPLACEME
+  - version: v20.0.0
     pr-url: https://github.com/nodejs/node/pull/46983
     description: The test runner is now stable.
 -->
@@ -1451,7 +1451,7 @@ added:
   - v19.6.0
   - v18.15.0
 changes:
-  - version: REPLACEME
+  - version: v20.0.0
     pr-url: https://github.com/nodejs/node/pull/46983
     description: The test runner is now stable.
 -->
@@ -1466,7 +1466,7 @@ added:
   - v18.0.0
   - v16.17.0
 changes:
-  - version: REPLACEME
+  - version: v20.0.0
     pr-url: https://github.com/nodejs/node/pull/46983
     description: The test runner is now stable.
 -->
