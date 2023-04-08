@@ -520,31 +520,6 @@ V8_NOINLINE Handle<JSFunction> InstallFunction(
                          instance_size, inobject_properties, prototype, call);
 }
 
-V8_NOINLINE Handle<JSFunction> CreateSharedObjectConstructor(
-    Isolate* isolate, Handle<String> name, InstanceType type, int instance_size,
-    int inobject_properties, ElementsKind element_kind, Builtin builtin) {
-  Factory* factory = isolate->factory();
-  Handle<SharedFunctionInfo> info = factory->NewSharedFunctionInfoForBuiltin(
-      name, builtin, FunctionKind::kNormalFunction);
-  info->set_language_mode(LanguageMode::kStrict);
-  Handle<JSFunction> constructor =
-      Factory::JSFunctionBuilder{isolate, info, isolate->native_context()}
-          .set_map(isolate->strict_function_with_readonly_prototype_map())
-          .Build();
-  Handle<Map> instance_map =
-      factory->NewMap(type, instance_size, element_kind, inobject_properties,
-                      AllocationType::kSharedMap);
-  // Shared objects have fixed layout ahead of time, so there's no slack.
-  instance_map->SetInObjectUnusedPropertyFields(0);
-  // Shared objects are not extensible and have a null prototype.
-  instance_map->set_is_extensible(false);
-  JSFunction::SetInitialMap(isolate, constructor, instance_map,
-                            factory->null_value(), factory->null_value());
-  constructor->map().SetConstructor(ReadOnlyRoots(isolate).null_value());
-  constructor->map().set_has_non_instance_prototype(true);
-  return constructor;
-}
-
 // This sets a constructor instance type on the constructor map which will be
 // used in IsXxxConstructor() predicates. Having such predicates helps figuring
 // out if a protector cell should be invalidated. If there are no protector
@@ -613,6 +588,36 @@ V8_NOINLINE Handle<JSFunction> InstallFunctionAtSymbol(
       SimpleCreateFunction(isolate, internalized_symbol, call, len, adapt);
   JSObject::AddProperty(isolate, base, symbol, fun, attrs);
   return fun;
+}
+
+V8_NOINLINE Handle<JSFunction> CreateSharedObjectConstructor(
+    Isolate* isolate, Handle<String> name, InstanceType type, int instance_size,
+    int inobject_properties, ElementsKind element_kind, Builtin builtin) {
+  Factory* factory = isolate->factory();
+  Handle<SharedFunctionInfo> info = factory->NewSharedFunctionInfoForBuiltin(
+      name, builtin, FunctionKind::kNormalFunction);
+  info->set_language_mode(LanguageMode::kStrict);
+  Handle<JSFunction> constructor =
+      Factory::JSFunctionBuilder{isolate, info, isolate->native_context()}
+          .set_map(isolate->strict_function_with_readonly_prototype_map())
+          .Build();
+  Handle<Map> instance_map =
+      factory->NewMap(type, instance_size, element_kind, inobject_properties,
+                      AllocationType::kSharedMap);
+  // Shared objects have fixed layout ahead of time, so there's no slack.
+  instance_map->SetInObjectUnusedPropertyFields(0);
+  // Shared objects are not extensible and have a null prototype.
+  instance_map->set_is_extensible(false);
+  JSFunction::SetInitialMap(isolate, constructor, instance_map,
+                            factory->null_value(), factory->null_value());
+  constructor->map().SetConstructor(ReadOnlyRoots(isolate).null_value());
+  constructor->map().set_has_non_instance_prototype(true);
+  JSObject::AddProperty(
+      isolate, constructor, factory->has_instance_symbol(),
+      handle(isolate->native_context()->shared_space_js_object_has_instance(),
+             isolate),
+      static_cast<PropertyAttributes>(DONT_ENUM | DONT_DELETE | READ_ONLY));
+  return constructor;
 }
 
 V8_NOINLINE void SimpleInstallGetterSetter(Isolate* isolate,
@@ -3150,22 +3155,24 @@ void Genesis::InitializeGlobal(Handle<JSGlobalObject> global_object,
                           factory->numberingSystem_string(),
                           Builtin::kLocalePrototypeNumberingSystem, true);
 
-      // Intl Locale Info functions
-      SimpleInstallGetter(isolate(), prototype, factory->calendars_string(),
-                          Builtin::kLocalePrototypeCalendars, true);
-      SimpleInstallGetter(isolate(), prototype, factory->collations_string(),
-                          Builtin::kLocalePrototypeCollations, true);
-      SimpleInstallGetter(isolate(), prototype, factory->hourCycles_string(),
-                          Builtin::kLocalePrototypeHourCycles, true);
-      SimpleInstallGetter(isolate(), prototype,
-                          factory->numberingSystems_string(),
-                          Builtin::kLocalePrototypeNumberingSystems, true);
-      SimpleInstallGetter(isolate(), prototype, factory->textInfo_string(),
-                          Builtin::kLocalePrototypeTextInfo, true);
-      SimpleInstallGetter(isolate(), prototype, factory->timeZones_string(),
-                          Builtin::kLocalePrototypeTimeZones, true);
-      SimpleInstallGetter(isolate(), prototype, factory->weekInfo_string(),
-                          Builtin::kLocalePrototypeWeekInfo, true);
+      if (!v8_flags.harmony_remove_intl_locale_info_getters) {
+        // Intl Locale Info functions
+        SimpleInstallGetter(isolate(), prototype, factory->calendars_string(),
+                            Builtin::kLocalePrototypeCalendars, true);
+        SimpleInstallGetter(isolate(), prototype, factory->collations_string(),
+                            Builtin::kLocalePrototypeCollations, true);
+        SimpleInstallGetter(isolate(), prototype, factory->hourCycles_string(),
+                            Builtin::kLocalePrototypeHourCycles, true);
+        SimpleInstallGetter(isolate(), prototype,
+                            factory->numberingSystems_string(),
+                            Builtin::kLocalePrototypeNumberingSystems, true);
+        SimpleInstallGetter(isolate(), prototype, factory->textInfo_string(),
+                            Builtin::kLocalePrototypeTextInfo, true);
+        SimpleInstallGetter(isolate(), prototype, factory->timeZones_string(),
+                            Builtin::kLocalePrototypeTimeZones, true);
+        SimpleInstallGetter(isolate(), prototype, factory->weekInfo_string(),
+                            Builtin::kLocalePrototypeWeekInfo, true);
+      }
     }
 
     {  // -- D i s p l a y N a m e s
@@ -4528,6 +4535,7 @@ EMPTY_INITIALIZE_GLOBAL_FOR_FEATURE(harmony_rab_gsab_transfer)
 
 #ifdef V8_INTL_SUPPORT
 EMPTY_INITIALIZE_GLOBAL_FOR_FEATURE(harmony_intl_best_fit_matcher)
+EMPTY_INITIALIZE_GLOBAL_FOR_FEATURE(harmony_remove_intl_locale_info_getters)
 #endif  // V8_INTL_SUPPORT
 
 #undef EMPTY_INITIALIZE_GLOBAL_FOR_FEATURE
@@ -4575,6 +4583,10 @@ void Genesis::InitializeGlobal_harmony_iterator_helpers() {
                         Builtin::kIteratorHelperPrototypeNext, 0, true);
   SimpleInstallFunction(isolate(), iterator_helper_prototype, "return",
                         Builtin::kIteratorHelperPrototypeReturn, 0, true);
+  SimpleInstallFunction(isolate(), iterator_prototype, "reduce",
+                        Builtin::kIteratorPrototypeReduce, 1, false);
+  SimpleInstallFunction(isolate(), iterator_prototype, "toArray",
+                        Builtin::kIteratorPrototypeToArray, 0, true);
 
   // --- Helper maps
 #define INSTALL_ITERATOR_HELPER(lowercase_name, Capitalized_name,              \
@@ -4595,7 +4607,8 @@ void Genesis::InitializeGlobal_harmony_iterator_helpers() {
   V(map, Map, MAP, 1)          \
   V(filter, Filter, FILTER, 1) \
   V(take, Take, TAKE, 1)       \
-  V(drop, Drop, DROP, 1)
+  V(drop, Drop, DROP, 1)       \
+  V(flatMap, FlatMap, FLAT_MAP, 1)
 
   ITERATOR_HELPERS(INSTALL_ITERATOR_HELPER)
 
@@ -4617,6 +4630,10 @@ void Genesis::InitializeGlobal_harmony_json_parse_with_source() {
   map->SetPrototype(isolate(), map, isolate()->factory()->null_value());
   map->SetConstructor(native_context()->object_function());
   native_context()->set_js_raw_json_map(*map);
+  // TODO(v8:12955): Remove the LOG after the flag is removed and this map goes
+  // into the startup snapshot. It is needed for the
+  // LogMapsTest.LogMapsDetailsContexts unittest.
+  LOG(isolate(), MapDetails(*map));
   SimpleInstallFunction(isolate_,
                         handle(native_context()->json_object(), isolate_),
                         "rawJSON", Builtin::kJsonRawJson, 1, true);
@@ -4755,18 +4772,31 @@ void Genesis::InitializeGlobal_harmony_struct() {
   if (!v8_flags.harmony_struct) return;
 
   Handle<JSGlobalObject> global(native_context()->global_object(), isolate());
-  Handle<String> name =
-      isolate()->factory()->InternalizeUtf8String("SharedStructType");
-  Handle<JSFunction> shared_struct_type_fun = CreateFunctionForBuiltin(
-      isolate(), name, isolate()->strict_function_with_readonly_prototype_map(),
-      Builtin::kSharedStructTypeConstructor);
-  JSObject::MakePrototypesFast(shared_struct_type_fun, kStartAtReceiver,
-                               isolate());
-  shared_struct_type_fun->shared().set_native(true);
-  shared_struct_type_fun->shared().DontAdaptArguments();
-  shared_struct_type_fun->shared().set_length(1);
-  JSObject::AddProperty(isolate(), global, "SharedStructType",
-                        shared_struct_type_fun, DONT_ENUM);
+
+  {
+    // Install shared objects @@hasInstance in the native context.
+    Handle<JSFunction> has_instance = SimpleCreateFunction(
+        isolate(), factory()->empty_string(),
+        Builtin::kSharedSpaceJSObjectHasInstance, 1, false);
+    native_context()->set_shared_space_js_object_has_instance(*has_instance);
+  }
+
+  {
+    // SharedStructType
+    Handle<String> name =
+        isolate()->factory()->InternalizeUtf8String("SharedStructType");
+    Handle<JSFunction> shared_struct_type_fun = CreateFunctionForBuiltin(
+        isolate(), name,
+        isolate()->strict_function_with_readonly_prototype_map(),
+        Builtin::kSharedStructTypeConstructor);
+    JSObject::MakePrototypesFast(shared_struct_type_fun, kStartAtReceiver,
+                                 isolate());
+    shared_struct_type_fun->shared().set_native(true);
+    shared_struct_type_fun->shared().DontAdaptArguments();
+    shared_struct_type_fun->shared().set_length(1);
+    JSObject::AddProperty(isolate(), global, "SharedStructType",
+                          shared_struct_type_fun, DONT_ENUM);
+  }
 
   {  // SharedArray
     Handle<String> shared_array_str =
@@ -5644,6 +5674,27 @@ void Genesis::InitializeGlobal_harmony_intl_number_format_v3() {
 #endif  // V8_INTL_SUPPORT
 
 #ifdef V8_INTL_SUPPORT
+void Genesis::InitializeGlobal_harmony_intl_locale_info_func() {
+  if (!v8_flags.harmony_intl_locale_info_func) return;
+  Handle<JSObject> prototype(
+      JSObject::cast(native_context()->intl_locale_function().prototype()),
+      isolate_);
+  SimpleInstallFunction(isolate(), prototype, "getCalendars",
+                        Builtin::kLocalePrototypeGetCalendars, 0, false);
+  SimpleInstallFunction(isolate(), prototype, "getCollations",
+                        Builtin::kLocalePrototypeGetCollations, 0, false);
+  SimpleInstallFunction(isolate(), prototype, "getHourCycles",
+                        Builtin::kLocalePrototypeGetHourCycles, 0, false);
+  SimpleInstallFunction(isolate(), prototype, "getNumberingSystems",
+                        Builtin::kLocalePrototypeGetNumberingSystems, 0, false);
+  SimpleInstallFunction(isolate(), prototype, "getTimeZones",
+                        Builtin::kLocalePrototypeGetTimeZones, 0, false);
+  SimpleInstallFunction(isolate(), prototype, "getTextInfo",
+                        Builtin::kLocalePrototypeGetTextInfo, 0, false);
+  SimpleInstallFunction(isolate(), prototype, "getWeekInfo",
+                        Builtin::kLocalePrototypeGetWeekInfo, 0, false);
+}
+
 void Genesis::InitializeGlobal_harmony_intl_duration_format() {
   if (!v8_flags.harmony_intl_duration_format) return;
   Handle<JSObject> intl = Handle<JSObject>::cast(

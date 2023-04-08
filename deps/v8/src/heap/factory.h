@@ -46,6 +46,8 @@ class EmbedderDataArray;
 class ArrayBoilerplateDescription;
 class CoverageInfo;
 class DebugInfo;
+class DeoptimizationData;
+class DeoptimizationLiteralArray;
 class EnumCache;
 class FreshlyAllocatedBigInt;
 class Isolate;
@@ -496,8 +498,9 @@ class V8_EXPORT_PRIVATE Factory : public FactoryBase<Factory> {
   Handle<JSObject> CopyJSObjectWithAllocationSite(Handle<JSObject> object,
                                                   Handle<AllocationSite> site);
 
-  Handle<FixedArray> CopyFixedArrayWithMap(Handle<FixedArray> array,
-                                           Handle<Map> map);
+  Handle<FixedArray> CopyFixedArrayWithMap(
+      Handle<FixedArray> array, Handle<Map> map,
+      AllocationType allocation = AllocationType::kYoung);
 
   Handle<FixedArray> CopyFixedArrayAndGrow(
       Handle<FixedArray> array, int grow_by,
@@ -634,16 +637,17 @@ class V8_EXPORT_PRIVATE Factory : public FactoryBase<Factory> {
                                        uint32_t type_index);
   Handle<WasmInternalFunction> NewWasmInternalFunction(Address opt_call_target,
                                                        Handle<HeapObject> ref,
-                                                       Handle<Map> rtt);
+                                                       Handle<Map> rtt,
+                                                       int function_index);
   Handle<WasmCapiFunctionData> NewWasmCapiFunctionData(
       Address call_target, Handle<Foreign> embedder_data,
       Handle<Code> wrapper_code, Handle<Map> rtt,
       Handle<PodArray<wasm::ValueType>> serialized_sig);
   Handle<WasmExportedFunctionData> NewWasmExportedFunctionData(
       Handle<Code> export_wrapper, Handle<WasmInstanceObject> instance,
-      Address call_target, Handle<Object> ref, int func_index,
+      Handle<WasmInternalFunction> internal, int func_index,
       const wasm::FunctionSig* sig, uint32_t canonical_type_index,
-      int wrapper_budget, Handle<Map> rtt, wasm::Promise promise);
+      int wrapper_budget, wasm::Promise promise);
   Handle<WasmApiFunctionRef> NewWasmApiFunctionRef(
       Handle<JSReceiver> callable, wasm::Suspend suspend,
       Handle<WasmInstanceObject> instance);
@@ -753,10 +757,20 @@ class V8_EXPORT_PRIVATE Factory : public FactoryBase<Factory> {
 
   Handle<DeoptimizationLiteralArray> NewDeoptimizationLiteralArray(int length);
 
-  // Allocates a new code object and initializes it as the trampoline to the
-  // given off-heap entry point.
-  Handle<Code> NewOffHeapTrampolineFor(Handle<Code> code,
-                                       Address off_heap_entry);
+  // Allocates a new code object and initializes it to point to the given
+  // off-heap entry point.
+  //
+  // Note it wouldn't be strictly necessary to create new Code objects, instead
+  // Code::instruction_start and instruction_stream could be reset. But creating
+  // a new Code object doesn't hurt much (it only makes mksnapshot slightly more
+  // expensive) and has real benefits:
+  // - it moves all special-casing to mksnapshot-time; at normal runtime, the
+  //   system only sees a) non-builtin Code objects (not in RO space, with
+  //   instruction_stream set) and b) builtin Code objects (maybe in RO space,
+  //   without instruction_stream set).
+  // - it's a convenient bottleneck to make the RO-space allocation decision.
+  Handle<Code> NewCodeObjectForEmbeddedBuiltin(Handle<Code> code,
+                                               Address off_heap_entry);
 
   Handle<BytecodeArray> CopyBytecodeArray(Handle<BytecodeArray>);
 
@@ -883,7 +897,8 @@ class V8_EXPORT_PRIVATE Factory : public FactoryBase<Factory> {
     return New(map, allocation);
   }
 
-  Handle<JSSharedStruct> NewJSSharedStruct(Handle<JSFunction> constructor);
+  Handle<JSSharedStruct> NewJSSharedStruct(
+      Handle<JSFunction> constructor, Handle<Object> maybe_elements_template);
 
   Handle<JSSharedArray> NewJSSharedArray(Handle<JSFunction> constructor,
                                          int length);
@@ -1006,11 +1021,6 @@ class V8_EXPORT_PRIVATE Factory : public FactoryBase<Factory> {
       return *this;
     }
 
-    CodeBuilder& set_kind_specific_flags(int32_t flags) {
-      kind_specific_flags_ = flags;
-      return *this;
-    }
-
     CodeBuilder& set_stack_slots(int stack_slots) {
       stack_slots_ = stack_slots;
       return *this;
@@ -1021,14 +1031,19 @@ class V8_EXPORT_PRIVATE Factory : public FactoryBase<Factory> {
       return *this;
     }
 
-    inline bool CompiledWithConcurrentBaseline() const;
-
    private:
     MaybeHandle<Code> BuildInternal(bool retry_allocation_or_fail);
+
+    // Dispatches to support concurrent allocation.
+    inline bool CompiledWithConcurrentBaseline() const;
+    Handle<ByteArray> NewByteArray(int length, AllocationType allocation);
+    MaybeHandle<InstructionStream> NewInstructionStream(
+        bool retry_allocation_or_fail);
     MaybeHandle<InstructionStream> AllocateInstructionStream(
         bool retry_allocation_or_fail);
     MaybeHandle<InstructionStream> AllocateConcurrentSparkplugInstructionStream(
         bool retry_allocation_or_fail);
+    Handle<Code> NewCode(const NewCodeOptions& options);
 
     Isolate* const isolate_;
     LocalIsolate* local_isolate_;
@@ -1039,12 +1054,10 @@ class V8_EXPORT_PRIVATE Factory : public FactoryBase<Factory> {
     Builtin builtin_ = Builtin::kNoBuiltinId;
     uint32_t inlined_bytecode_size_ = 0;
     BytecodeOffset osr_offset_ = BytecodeOffset::None();
-    int32_t kind_specific_flags_ = 0;
-    // Either source_position_table for non-baseline code
-    // or bytecode_offset_table for baseline code.
+    // Either source_position_table for non-baseline code or
+    // bytecode_offset_table for baseline code.
     Handle<ByteArray> position_table_;
-    Handle<DeoptimizationData> deoptimization_data_ =
-        DeoptimizationData::Empty(isolate_);
+    Handle<DeoptimizationData> deoptimization_data_;
     Handle<HeapObject> interpreter_data_;
     BasicBlockProfilerData* profiler_data_ = nullptr;
     bool is_turbofanned_ = false;
@@ -1112,7 +1125,9 @@ class V8_EXPORT_PRIVATE Factory : public FactoryBase<Factory> {
   HeapObject New(Handle<Map> map, AllocationType allocation);
 
   template <typename T>
-  Handle<T> CopyArrayWithMap(Handle<T> src, Handle<Map> map);
+  Handle<T> CopyArrayWithMap(
+      Handle<T> src, Handle<Map> map,
+      AllocationType allocation = AllocationType::kYoung);
   template <typename T>
   Handle<T> CopyArrayAndGrow(Handle<T> src, int grow_by,
                              AllocationType allocation);
@@ -1159,6 +1174,13 @@ class V8_EXPORT_PRIVATE Factory : public FactoryBase<Factory> {
 
   Handle<WeakArrayList> NewUninitializedWeakArrayList(
       int capacity, AllocationType allocation = AllocationType::kYoung);
+
+#if V8_ENABLE_WEBASSEMBLY
+  // The resulting array will be uninitialized, which means GC might fail for
+  // reference arrays until initialization. Follow this up with a
+  // {DisallowGarbageCollection} scope until initialization.
+  WasmArray NewWasmArrayUninitialized(uint32_t length, Handle<Map> map);
+#endif  // V8_ENABLE_WEBASSEMBLY
 };
 
 }  // namespace internal

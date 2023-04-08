@@ -224,11 +224,15 @@ class TypeInferenceAnalysis {
         case Opcode::kTailCall:
         case Opcode::kObjectIs:
         case Opcode::kFloatIs:
-        case Opcode::kConvertToObject:
-        case Opcode::kConvertToObjectOrDeopt:
+        case Opcode::kObjectIsNumericValue:
+        case Opcode::kConvert:
+        case Opcode::kConvertOrDeopt:
+        case Opcode::kConvertPrimitiveToObject:
+        case Opcode::kConvertPrimitiveToObjectOrDeopt:
         case Opcode::kConvertObjectToPrimitive:
         case Opcode::kConvertObjectToPrimitiveOrDeopt:
         case Opcode::kTruncateObjectToPrimitive:
+        case Opcode::kTruncateObjectToPrimitiveOrDeopt:
         case Opcode::kTag:
         case Opcode::kUntag:
         case Opcode::kNewConsString:
@@ -247,8 +251,26 @@ class TypeInferenceAnalysis {
         case Opcode::kStringIndexOf:
         case Opcode::kStringFromCodePointAt:
         case Opcode::kStringSubstring:
+        case Opcode::kStringConcat:
         case Opcode::kStringEqual:
         case Opcode::kStringComparison:
+        case Opcode::kArgumentsLength:
+        case Opcode::kNewArgumentsElements:
+        case Opcode::kLoadTypedElement:
+        case Opcode::kLoadDataViewElement:
+        case Opcode::kLoadStackArgument:
+        case Opcode::kStoreTypedElement:
+        case Opcode::kStoreDataViewElement:
+        case Opcode::kStoreSignedSmallElement:
+        case Opcode::kCompareMaps:
+        case Opcode::kCheckMaps:
+        case Opcode::kCheckEqualsInternalizedString:
+        case Opcode::kLoadMessage:
+        case Opcode::kStoreMessage:
+        case Opcode::kSameValue:
+        case Opcode::kFloat64SameValue:
+        case Opcode::kFastApiCall:
+        case Opcode::kRuntimeAbort:
           // TODO(nicohartmann@): Support remaining operations. For now we
           // compute fallback types.
           if (op.outputs_rep().size() > 0) {

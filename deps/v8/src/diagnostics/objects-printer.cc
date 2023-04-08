@@ -1234,7 +1234,6 @@ void FeedbackVector::FeedbackVectorPrint(std::ostream& os) {
   os << "\n - maybe has maglev code: " << maybe_has_maglev_code();
   os << "\n - maybe has turbofan code: " << maybe_has_turbofan_code();
   os << "\n - invocation count: " << invocation_count();
-  os << "\n - profiler ticks: " << profiler_ticks();
   os << "\n - closure feedback cell array: ";
   closure_feedback_cell_array().ClosureFeedbackCellArrayPrint(os);
 
@@ -1617,6 +1616,16 @@ void JSIteratorDropHelper::JSIteratorDropHelperPrint(std::ostream& os) {
   JSObjectPrintBody(os, *this);
 }
 
+void JSIteratorFlatMapHelper::JSIteratorFlatMapHelperPrint(std::ostream& os) {
+  JSIteratorHelperPrintHeader(os, "JSIteratorFlatMapHelper");
+  os << "\n - mapper: " << Brief(mapper());
+  os << "\n - counter: " << counter();
+  os << "\n - innerIterator.object" << Brief(innerIterator_object());
+  os << "\n - innerIterator.next" << Brief(innerIterator_next());
+  os << "\n - innerAlive" << innerAlive();
+  JSObjectPrintBody(os, *this);
+}
+
 void JSWeakMap::JSWeakMapPrint(std::ostream& os) {
   JSObjectPrintHeader(os, *this, "JSWeakMap");
   os << "\n - table: " << Brief(table());
@@ -1893,9 +1902,9 @@ void Code::CodePrint(std::ostream& os) {
   if (has_instruction_stream()) {
     os << "\n - instruction_stream: " << Brief(raw_instruction_stream());
   }
-  os << "\n - code_entry_point: "
-     << reinterpret_cast<void*>(code_entry_point());
-  os << "\n - kind_specific_flags: " << kind_specific_flags(kRelaxedLoad);
+  os << "\n - instruction_start: "
+     << reinterpret_cast<void*>(instruction_start());
+  os << "\n - flags: " << flags(kRelaxedLoad);
   os << "\n";
   if (has_instruction_stream()) {
     instruction_stream().Print(os);
@@ -2137,6 +2146,7 @@ void WasmSuspenderObject::WasmSuspenderObjectPrint(std::ostream& os) {
   os << "\n - continuation: " << continuation();
   os << "\n - parent: " << parent();
   os << "\n - state: " << state();
+  os << "\n - wasm_to_js_counter: " << wasm_to_js_counter();
   os << "\n";
 }
 

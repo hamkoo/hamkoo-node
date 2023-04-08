@@ -326,30 +326,24 @@ MaybeHandle<JSArray> Runtime::GetInternalProperties(Isolate* isolate,
           isolate->factory()->true_value());
     } else {
       const size_t byte_length = js_array_buffer->byte_length();
-      static const ExternalArrayType kTypes[] = {
-          kExternalInt8Array,
-          kExternalUint8Array,
-          kExternalInt16Array,
-          kExternalInt32Array,
-      };
-      for (auto type : kTypes) {
-        switch (type) {
-#define TYPED_ARRAY_CASE(Type, type, TYPE, ctype)                           \
-  case kExternal##Type##Array: {                                            \
-    if ((byte_length % sizeof(ctype)) != 0) continue;                       \
-    result = ArrayList::Add(                                                \
-        isolate, result,                                                    \
-        isolate->factory()->NewStringFromStaticChars("[[" #Type "Array]]"), \
-        isolate->factory()->NewJSTypedArray(kExternal##Type##Array,         \
-                                            js_array_buffer, 0,             \
-                                            byte_length / sizeof(ctype)));  \
-    break;                                                                  \
-  }
-          TYPED_ARRAYS(TYPED_ARRAY_CASE)
-#undef TYPED_ARRAY_CASE
-        default:
-          UNREACHABLE();
-        }
+      // TODO(v8:4153): Remove this code once the maximum lengths are equal (and
+      // add a static assertion that it stays that way).
+      static_assert(JSTypedArray::kMaxLength < JSArrayBuffer::kMaxByteLength);
+      CHECK_LE(byte_length, JSArrayBuffer::kMaxByteLength);
+      using DataView = std::tuple<const char*, ExternalArrayType, size_t>;
+      for (auto [name, type, elem_size] :
+           {DataView{"[[Int8Array]]", kExternalInt8Array, 1},
+            DataView{"[[Uint8Array]]", kExternalUint8Array, 1},
+            DataView{"[[Int16Array]]", kExternalInt16Array, 2},
+            DataView{"[[Int32Array]]", kExternalInt32Array, 4}}) {
+        if ((byte_length % elem_size) != 0) continue;
+        size_t length = byte_length / elem_size;
+        if (length > JSTypedArray::kMaxLength) continue;
+        result =
+            ArrayList::Add(isolate, result,
+                           isolate->factory()->NewStringFromAsciiChecked(name),
+                           isolate->factory()->NewJSTypedArray(
+                               type, js_array_buffer, 0, length));
       }
       result =
           ArrayList::Add(isolate, result,
@@ -871,9 +865,14 @@ RUNTIME_FUNCTION(Runtime_DebugAsyncFunctionSuspended) {
                         Just(ShouldThrow::kThrowOnError))
         .Check();
 
-    Object::SetProperty(
-        isolate, promise, isolate->factory()->promise_awaited_by_symbol(),
-        generator, StoreOrigin::kMaybeKeyed, Just(ShouldThrow::kThrowOnError))
+    Handle<WeakFixedArray> awaited_by_holder(
+        isolate->factory()->NewWeakFixedArray(1));
+    awaited_by_holder->Set(
+        0, MaybeObject::MakeWeak(MaybeObject::FromObject(*generator)));
+    Object::SetProperty(isolate, promise,
+                        isolate->factory()->promise_awaited_by_symbol(),
+                        awaited_by_holder, StoreOrigin::kMaybeKeyed,
+                        Just(ShouldThrow::kThrowOnError))
         .Check();
   }
 

@@ -112,6 +112,14 @@ class MaglevAssembler : public MacroAssembler {
                                         int offset);
   inline void LoadExternalPointerField(Register result, MemOperand operand);
 
+  inline void LoadFixedArrayElement(Register result, Register array,
+                                    Register index);
+  inline void LoadFixedArrayElementWithoutDecompressing(Register result,
+                                                        Register array,
+                                                        Register index);
+  inline void LoadFixedDoubleArrayElement(DoubleRegister result, Register array,
+                                          Register index);
+
   inline void LoadSignedField(Register result, MemOperand operand,
                               int element_size);
   inline void LoadUnsignedField(Register result, MemOperand operand,
@@ -256,6 +264,8 @@ class MaglevAssembler : public MacroAssembler {
 
   inline void CompareInt32(Register reg, int32_t imm);
   inline void CompareInt32(Register src1, Register src2);
+
+  inline void CompareFloat64(DoubleRegister src1, DoubleRegister src2);
 
   inline void CallSelf();
 
@@ -509,9 +519,10 @@ struct is_iterator_range<base::iterator_range<T>> : std::true_type {};
 
 // General helpers.
 
-inline bool AnyMapIsHeapNumber(const ZoneHandleSet<Map>& maps) {
-  return std::any_of(maps.begin(), maps.end(),
-                     [](Handle<Map> map) { return map->IsHeapNumberMap(); });
+inline bool AnyMapIsHeapNumber(const compiler::ZoneRefSet<Map>& maps) {
+  return std::any_of(maps.begin(), maps.end(), [](compiler::MapRef map) {
+    return map.IsHeapNumberMap();
+  });
 }
 
 inline Condition ToCondition(AssertCondition cond) {

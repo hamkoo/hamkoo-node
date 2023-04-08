@@ -335,6 +335,26 @@
   },
   ##############################################################################
   # Linux64
+  'v8_linux64_arm64_dbg': {
+    'swarming_dimensions': {
+      'os': 'Linux',
+      'cpu': 'arm64',
+      'pool': 'chromium.tests',
+    },
+    'tests': [
+      {'name': 'v8testing', 'variant': 'default'},
+    ],
+  },
+  'v8_linux64_arm64_rel': {
+    'swarming_dimensions': {
+      'os': 'Linux',
+      'cpu': 'arm64',
+      'pool': 'chromium.tests',
+    },
+    'tests': [
+      {'name': 'v8testing', 'variant': 'default'},
+    ],
+  },
   'v8_linux64_asan_rel': {
     'swarming_dimensions' : {
       'os': 'Ubuntu-18.04',
@@ -1911,6 +1931,15 @@
       {'name': 'v8testing', 'shards': 5},
     ],
   },
+  'V8 Win32 PGO instrumentation - builder' : {
+    'swarming_dimensions': {
+      'cpu': 'x86-64',
+      'os': 'Windows-10-19045',
+    },
+    'tests': [
+      {'name': 'pgo_instrumentation'}
+    ],
+  },
   'V8 Win64': {
     'swarming_dimensions': {
       'os': 'Windows-10-19045',
@@ -1949,6 +1978,14 @@
     },
     'tests': [
       {'name': 'v8testing', 'shards': 5},
+    ],
+  },
+  'V8 Win64 PGO instrumentation - builder' : {
+    'swarming_dimensions': {
+      'os': 'Windows-10-19045',
+    },
+    'tests': [
+      {'name': 'pgo_instrumentation'}
     ],
   },
   ##############################################################################
@@ -2286,6 +2323,26 @@
     },
     'tests': [
       {'name': 'v8testing', 'shards': 3},
+    ],
+  },
+  'V8 Linux64 - arm64': {
+    'swarming_dimensions': {
+      'os': 'Linux',
+      'cpu': 'arm64',
+      'pool': 'chromium.tests',
+    },
+    'tests': [
+      {'name': 'v8testing',  'variant': 'default'},
+    ],
+  },
+  'V8 Linux64 - arm64 - debug': {
+    'swarming_dimensions': {
+      'os': 'Linux',
+      'cpu': 'arm64',
+      'pool': 'chromium.tests',
+    },
+    'tests': [
+      {'name': 'v8testing', 'variant': 'default'},
     ],
   },
   'V8 Linux64 - arm64 - sim - no pointer compression': {

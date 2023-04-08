@@ -18,6 +18,7 @@
 #include "src/codegen/machine-type.h"
 #include "src/compiler/common-operator.h"
 #include "src/compiler/compiler-source-position-table.h"
+#include "src/compiler/fast-api-calls.h"
 #include "src/compiler/js-heap-broker.h"
 #include "src/compiler/machine-operator.h"
 #include "src/compiler/node-aux-data.h"
@@ -34,6 +35,8 @@
 #include "src/compiler/turboshaft/graph.h"
 #include "src/compiler/turboshaft/operations.h"
 #include "src/compiler/turboshaft/representations.h"
+#include "src/heap/factory-inl.h"
+#include "src/objects/map.h"
 #include "src/zone/zone-containers.h"
 
 namespace v8::internal::compiler::turboshaft {
@@ -665,9 +668,43 @@ OpIndex GraphBuilder::Process(
       return __ TaggedBitcast(Map(node->InputAt(0)),
                               RegisterRepresentation::PointerSized(),
                               RegisterRepresentation::Tagged());
-    case IrOpcode::kNumberIsNaN:
-      return __ FloatIs(Map(node->InputAt(0)), FloatIsOp::Kind::kNaN,
+    case IrOpcode::kNumberIsFinite:
+      return __ FloatIs(Map(node->InputAt(0)), NumericKind::kFinite,
                         FloatRepresentation::Float64());
+    case IrOpcode::kNumberIsInteger:
+      return __ FloatIs(Map(node->InputAt(0)), NumericKind::kInteger,
+                        FloatRepresentation::Float64());
+    case IrOpcode::kNumberIsSafeInteger:
+      return __ FloatIs(Map(node->InputAt(0)), NumericKind::kSafeInteger,
+                        FloatRepresentation::Float64());
+    case IrOpcode::kNumberIsFloat64Hole:
+      return __ FloatIs(Map(node->InputAt(0)), NumericKind::kFloat64Hole,
+                        FloatRepresentation::Float64());
+    case IrOpcode::kNumberIsMinusZero:
+      return __ FloatIs(Map(node->InputAt(0)), NumericKind::kMinusZero,
+                        FloatRepresentation::Float64());
+    case IrOpcode::kNumberIsNaN:
+      return __ FloatIs(Map(node->InputAt(0)), NumericKind::kNaN,
+                        FloatRepresentation::Float64());
+    case IrOpcode::kObjectIsMinusZero:
+      return __ ObjectIsNumericValue(Map(node->InputAt(0)),
+                                     NumericKind::kMinusZero,
+                                     FloatRepresentation::Float64());
+    case IrOpcode::kObjectIsNaN:
+      return __ ObjectIsNumericValue(Map(node->InputAt(0)), NumericKind::kNaN,
+                                     FloatRepresentation::Float64());
+    case IrOpcode::kObjectIsFiniteNumber:
+      return __ ObjectIsNumericValue(Map(node->InputAt(0)),
+                                     NumericKind::kFinite,
+                                     FloatRepresentation::Float64());
+    case IrOpcode::kObjectIsInteger:
+      return __ ObjectIsNumericValue(Map(node->InputAt(0)),
+                                     NumericKind::kInteger,
+                                     FloatRepresentation::Float64());
+    case IrOpcode::kObjectIsSafeInteger:
+      return __ ObjectIsNumericValue(Map(node->InputAt(0)),
+                                     NumericKind::kSafeInteger,
+                                     FloatRepresentation::Float64());
 
 #define OBJECT_IS_CASE(kind)                                             \
   case IrOpcode::kObjectIs##kind: {                                      \
@@ -717,56 +754,111 @@ OpIndex GraphBuilder::Process(
                            NotABigInt64, CheckParametersOf(op).feedback())
 #undef CHECK_OBJECT_IS_CASE
 
-#define CONVERT_TO_OBJECT_CASE(name, kind, input_type, input_interpretation) \
-  case IrOpcode::k##name:                                                    \
-    return __ ConvertToObject(                                               \
-        Map(node->InputAt(0)), ConvertToObjectOp::Kind::k##kind,             \
-        V<input_type>::rep,                                                  \
-        ConvertToObjectOp::InputInterpretation::k##input_interpretation,     \
+    case IrOpcode::kPlainPrimitiveToNumber:
+      return __ ConvertPlainPrimitiveToNumber(Map(node->InputAt(0)));
+    case IrOpcode::kPlainPrimitiveToWord32:
+      return __ ConvertObjectToPrimitive(
+          Map(node->InputAt(0)), ConvertObjectToPrimitiveOp::Kind::kInt32,
+          ConvertObjectToPrimitiveOp::InputAssumptions::kPlainPrimitive);
+    case IrOpcode::kPlainPrimitiveToFloat64:
+      return __ ConvertObjectToPrimitive(
+          Map(node->InputAt(0)), ConvertObjectToPrimitiveOp::Kind::kFloat64,
+          ConvertObjectToPrimitiveOp::InputAssumptions::kPlainPrimitive);
+
+    case IrOpcode::kConvertTaggedHoleToUndefined: {
+      V<Object> input = Map(node->InputAt(0));
+      V<Word32> is_the_hole = __ TaggedEqual(
+          input, __ HeapConstant(isolate->factory()->the_hole_value()));
+      return __ Conditional(
+          is_the_hole, __ HeapConstant(isolate->factory()->undefined_value()),
+          input);
+    }
+
+    case IrOpcode::kToBoolean:
+      return __ ConvertToBoolean(Map(node->InputAt(0)));
+    case IrOpcode::kNumberToString:
+      return __ ConvertNumberToString(Map(node->InputAt(0)));
+    case IrOpcode::kStringToNumber:
+      return __ ConvertStringToNumber(Map(node->InputAt(0)));
+    case IrOpcode::kChangeTaggedToTaggedSigned:
+      return __ Convert(Map(node->InputAt(0)),
+                        ConvertOp::Kind::kNumberOrOddball,
+                        ConvertOp::Kind::kSmi);
+
+    case IrOpcode::kCheckedTaggedToTaggedSigned:
+      DCHECK(dominating_frame_state.valid());
+      return __ ConvertOrDeopt(Map(node->InputAt(0)), dominating_frame_state,
+                               ConvertOrDeoptOp::Kind::kObject,
+                               ConvertOrDeoptOp::Kind::kSmi,
+                               CheckParametersOf(node->op()).feedback());
+    case IrOpcode::kCheckedTaggedToTaggedPointer:
+      DCHECK(dominating_frame_state.valid());
+      return __ ConvertOrDeopt(Map(node->InputAt(0)), dominating_frame_state,
+                               ConvertOrDeoptOp::Kind::kObject,
+                               ConvertOrDeoptOp::Kind::kHeapObject,
+                               CheckParametersOf(node->op()).feedback());
+
+#define CONVERT_PRIMITIVE_TO_OBJECT_CASE(name, kind, input_type,          \
+                                         input_interpretation)            \
+  case IrOpcode::k##name:                                                 \
+    return __ ConvertPrimitiveToObject(                                   \
+        Map(node->InputAt(0)), ConvertPrimitiveToObjectOp::Kind::k##kind, \
+        V<input_type>::rep,                                               \
+        ConvertPrimitiveToObjectOp::InputInterpretation::                 \
+            k##input_interpretation,                                      \
         CheckForMinusZeroMode::kDontCheckForMinusZero);
-      CONVERT_TO_OBJECT_CASE(ChangeInt32ToTagged, Number, Word32, Signed)
-      CONVERT_TO_OBJECT_CASE(ChangeUint32ToTagged, Number, Word32, Unsigned)
-      CONVERT_TO_OBJECT_CASE(ChangeInt64ToTagged, Number, Word64, Signed)
-      CONVERT_TO_OBJECT_CASE(ChangeUint64ToTagged, Number, Word64, Unsigned)
-      CONVERT_TO_OBJECT_CASE(ChangeFloat64ToTaggedPointer, HeapNumber, Float64,
-                             Signed)
-      CONVERT_TO_OBJECT_CASE(ChangeInt64ToBigInt, BigInt, Word64, Signed)
-      CONVERT_TO_OBJECT_CASE(ChangeUint64ToBigInt, BigInt, Word64, Unsigned)
-      CONVERT_TO_OBJECT_CASE(ChangeInt31ToTaggedSigned, Smi, Word32, Signed)
-      CONVERT_TO_OBJECT_CASE(ChangeBitToTagged, Boolean, Word32, Signed)
-      CONVERT_TO_OBJECT_CASE(StringFromSingleCharCode, String, Word32, CharCode)
-      CONVERT_TO_OBJECT_CASE(StringFromSingleCodePoint, String, Word32,
-                             CodePoint)
+      CONVERT_PRIMITIVE_TO_OBJECT_CASE(ChangeInt32ToTagged, Number, Word32,
+                                       Signed)
+      CONVERT_PRIMITIVE_TO_OBJECT_CASE(ChangeUint32ToTagged, Number, Word32,
+                                       Unsigned)
+      CONVERT_PRIMITIVE_TO_OBJECT_CASE(ChangeInt64ToTagged, Number, Word64,
+                                       Signed)
+      CONVERT_PRIMITIVE_TO_OBJECT_CASE(ChangeUint64ToTagged, Number, Word64,
+                                       Unsigned)
+      CONVERT_PRIMITIVE_TO_OBJECT_CASE(ChangeFloat64ToTaggedPointer, HeapNumber,
+                                       Float64, Signed)
+      CONVERT_PRIMITIVE_TO_OBJECT_CASE(ChangeInt64ToBigInt, BigInt, Word64,
+                                       Signed)
+      CONVERT_PRIMITIVE_TO_OBJECT_CASE(ChangeUint64ToBigInt, BigInt, Word64,
+                                       Unsigned)
+      CONVERT_PRIMITIVE_TO_OBJECT_CASE(ChangeInt31ToTaggedSigned, Smi, Word32,
+                                       Signed)
+      CONVERT_PRIMITIVE_TO_OBJECT_CASE(ChangeBitToTagged, Boolean, Word32,
+                                       Signed)
+      CONVERT_PRIMITIVE_TO_OBJECT_CASE(StringFromSingleCharCode, String, Word32,
+                                       CharCode)
+      CONVERT_PRIMITIVE_TO_OBJECT_CASE(StringFromSingleCodePoint, String,
+                                       Word32, CodePoint)
 
     case IrOpcode::kChangeFloat64ToTagged:
-      return __ ConvertToObject(Map(node->InputAt(0)),
-                                ConvertToObjectOp::Kind::kNumber,
-                                RegisterRepresentation::Float64(),
-                                ConvertToObjectOp::InputInterpretation::kSigned,
-                                CheckMinusZeroModeOf(node->op()));
-#undef CONVERT_TO_OBJECT_CASE
+      return __ ConvertPrimitiveToObject(
+          Map(node->InputAt(0)), ConvertPrimitiveToObjectOp::Kind::kNumber,
+          RegisterRepresentation::Float64(),
+          ConvertPrimitiveToObjectOp::InputInterpretation::kSigned,
+          CheckMinusZeroModeOf(node->op()));
+#undef CONVERT_PRIMITIVE_TO_OBJECT_CASE
 
-#define CONVERT_TO_OBJECT_OR_DEOPT_CASE(name, kind, input_type,      \
-                                        input_interpretation)        \
-  case IrOpcode::k##name: {                                          \
-    DCHECK(dominating_frame_state.valid());                          \
-    const CheckParameters& params = CheckParametersOf(node->op());   \
-    return __ ConvertToObjectOrDeopt(                                \
-        Map(node->InputAt(0)), dominating_frame_state,               \
-        ConvertToObjectOrDeoptOp::Kind::k##kind, V<input_type>::rep, \
-        ConvertToObjectOrDeoptOp::InputInterpretation::              \
-            k##input_interpretation,                                 \
-        params.feedback());                                          \
+#define CONVERT_PRIMITIVE_TO_OBJECT_OR_DEOPT_CASE(name, kind, input_type,     \
+                                                  input_interpretation)       \
+  case IrOpcode::k##name: {                                                   \
+    DCHECK(dominating_frame_state.valid());                                   \
+    const CheckParameters& params = CheckParametersOf(node->op());            \
+    return __ ConvertPrimitiveToObjectOrDeopt(                                \
+        Map(node->InputAt(0)), dominating_frame_state,                        \
+        ConvertPrimitiveToObjectOrDeoptOp::Kind::k##kind, V<input_type>::rep, \
+        ConvertPrimitiveToObjectOrDeoptOp::InputInterpretation::              \
+            k##input_interpretation,                                          \
+        params.feedback());                                                   \
   }
-      CONVERT_TO_OBJECT_OR_DEOPT_CASE(CheckedInt32ToTaggedSigned, Smi, Word32,
-                                      Signed)
-      CONVERT_TO_OBJECT_OR_DEOPT_CASE(CheckedUint32ToTaggedSigned, Smi, Word32,
-                                      Unsigned)
-      CONVERT_TO_OBJECT_OR_DEOPT_CASE(CheckedInt64ToTaggedSigned, Smi, Word64,
-                                      Signed)
-      CONVERT_TO_OBJECT_OR_DEOPT_CASE(CheckedUint64ToTaggedSigned, Smi, Word64,
-                                      Unsigned)
-#undef CONVERT_TO_OBJECT_OR_DEOPT_CASE
+      CONVERT_PRIMITIVE_TO_OBJECT_OR_DEOPT_CASE(CheckedInt32ToTaggedSigned, Smi,
+                                                Word32, Signed)
+      CONVERT_PRIMITIVE_TO_OBJECT_OR_DEOPT_CASE(CheckedUint32ToTaggedSigned,
+                                                Smi, Word32, Unsigned)
+      CONVERT_PRIMITIVE_TO_OBJECT_OR_DEOPT_CASE(CheckedInt64ToTaggedSigned, Smi,
+                                                Word64, Signed)
+      CONVERT_PRIMITIVE_TO_OBJECT_OR_DEOPT_CASE(CheckedUint64ToTaggedSigned,
+                                                Smi, Word64, Unsigned)
+#undef CONVERT_PRIMITIVE_TO_OBJECT_OR_DEOPT_CASE
 
 #define CONVERT_OBJECT_TO_PRIMITIVE_CASE(name, kind, input_assumptions)   \
   case IrOpcode::k##name:                                                 \
@@ -800,6 +892,26 @@ OpIndex GraphBuilder::Process(
       TRUNCATE_OBJECT_TO_PRIMITIVE_CASE(TruncateTaggedPointerToBit, Bit,
                                         HeapObject)
 #undef TRUNCATE_OBJECT_TO_PRIMITIVE_CASE
+
+    case IrOpcode::kCheckedTruncateTaggedToWord32:
+      DCHECK(dominating_frame_state.valid());
+      using IR = TruncateObjectToPrimitiveOrDeoptOp::InputRequirement;
+      IR input_requirement;
+      switch (CheckTaggedInputParametersOf(node->op()).mode()) {
+        case CheckTaggedInputMode::kNumber:
+          input_requirement = IR::kNumber;
+          break;
+        case CheckTaggedInputMode::kNumberOrBoolean:
+          input_requirement = IR::kNumberOrBoolean;
+          break;
+        case CheckTaggedInputMode::kNumberOrOddball:
+          input_requirement = IR::kNumberOrOddball;
+          break;
+      }
+      return __ TruncateObjectToPrimitiveOrDeopt(
+          Map(node->InputAt(0)), dominating_frame_state,
+          TruncateObjectToPrimitiveOrDeoptOp::Kind::kInt32, input_requirement,
+          CheckTaggedInputParametersOf(node->op()).feedback());
 
 #define CHANGE_OR_DEOPT_INT_CASE(kind)                                     \
   case IrOpcode::kChecked##kind: {                                         \
@@ -1146,6 +1258,16 @@ OpIndex GraphBuilder::Process(
       __ Unreachable();
       return OpIndex::Invalid();
 
+    case IrOpcode::kDeadValue:
+      // Typically, DeadValue nodes have Unreachable as their input. In this
+      // case, we would not get here because Unreachable already terminated the
+      // block and we stopped generating additional operations.
+      DCHECK_NE(node->InputAt(0)->opcode(), IrOpcode::kUnreachable);
+      // If we find a DeadValue without an Unreachable input, we just generate
+      // one here and stop.
+      __ Unreachable();
+      return OpIndex::Invalid();
+
     case IrOpcode::kProjection: {
       Node* input = node->InputAt(0);
       size_t index = ProjectionIndexOf(op);
@@ -1436,7 +1558,7 @@ OpIndex GraphBuilder::Process(
 
           // Check if {lhs} is kMinInt and {rhs} is -1, in which case we'd have
           // to return -kMinInt, which is not representable as Word32.
-          IF_UNLIKELY(__ Word32Equal(lhs, kMinInt)) {
+          IF(UNLIKELY(__ Word32Equal(lhs, kMinInt))) {
             __ DeoptimizeIf(__ Word32Equal(rhs, -1), dominating_frame_state,
                             DeoptimizeReason::kOverflow, FeedbackSource{});
           }
@@ -1464,7 +1586,7 @@ OpIndex GraphBuilder::Process(
                       DeoptimizeReason::kDivisionByZero, FeedbackSource{});
       // Check if {lhs} is kMinInt64 and {rhs} is -1, in which case we'd have
       // to return -kMinInt64, which is not representable as Word64.
-      IF_UNLIKELY(__ Word64Equal(lhs, std::numeric_limits<int64_t>::min())) {
+      IF(UNLIKELY(__ Word64Equal(lhs, std::numeric_limits<int64_t>::min()))) {
         __ DeoptimizeIf(__ Word64Equal(rhs, int64_t{-1}),
                         dominating_frame_state, DeoptimizeReason::kOverflow,
                         FeedbackSource{});
@@ -1585,7 +1707,7 @@ OpIndex GraphBuilder::Process(
 
       // While the mod-result cannot overflow, the underlying instruction is
       // `idiv` and will trap when the accompanying div-result overflows.
-      IF_UNLIKELY(__ Word64Equal(lhs, std::numeric_limits<int64_t>::min())) {
+      IF(UNLIKELY(__ Word64Equal(lhs, std::numeric_limits<int64_t>::min()))) {
         __ DeoptimizeIf(__ Word64Equal(rhs, int64_t{-1}),
                         dominating_frame_state, DeoptimizeReason::kOverflow,
                         FeedbackSource{});
@@ -1673,6 +1795,10 @@ OpIndex GraphBuilder::Process(
       return __ StringSubstring(Map(node->InputAt(0)), Map(node->InputAt(1)),
                                 Map(node->InputAt(2)));
 
+    case IrOpcode::kStringConcat:
+      // We don't need node->InputAt(0) here.
+      return __ StringConcat(Map(node->InputAt(1)), Map(node->InputAt(2)));
+
     case IrOpcode::kStringEqual:
       return __ StringEqual(Map(node->InputAt(0)), Map(node->InputAt(1)));
     case IrOpcode::kStringLessThan:
@@ -1680,6 +1806,199 @@ OpIndex GraphBuilder::Process(
     case IrOpcode::kStringLessThanOrEqual:
       return __ StringLessThanOrEqual(Map(node->InputAt(0)),
                                       Map(node->InputAt(1)));
+
+    case IrOpcode::kArgumentsLength:
+      return __ ArgumentsLength();
+    case IrOpcode::kRestLength:
+      return __ RestLength(FormalParameterCountOf(node->op()));
+
+    case IrOpcode::kNewArgumentsElements: {
+      const auto& p = NewArgumentsElementsParametersOf(node->op());
+      // EffectControlLinearizer used to use `node->op()->properties()` to
+      // construct the builtin call descriptor for this operation. However, this
+      // always seemed to be `kEliminatable` so the Turboshaft
+      // BuiltinCallDescriptor's for those builtins have this property
+      // hard-coded.
+      DCHECK_EQ(node->op()->properties(), Operator::kEliminatable);
+      return __ NewArgumentsElements(Map(node->InputAt(0)), p.arguments_type(),
+                                     p.formal_parameter_count());
+    }
+
+    case IrOpcode::kLoadTypedElement:
+      return __ LoadTypedElement(Map(node->InputAt(0)), Map(node->InputAt(1)),
+                                 Map(node->InputAt(2)), Map(node->InputAt(3)),
+                                 ExternalArrayTypeOf(node->op()));
+    case IrOpcode::kLoadDataViewElement:
+      return __ LoadDataViewElement(
+          Map(node->InputAt(0)), Map(node->InputAt(1)), Map(node->InputAt(2)),
+          Map(node->InputAt(3)), ExternalArrayTypeOf(node->op()));
+    case IrOpcode::kLoadStackArgument:
+      return __ LoadStackArgument(Map(node->InputAt(0)), Map(node->InputAt(1)));
+
+    case IrOpcode::kStoreTypedElement:
+      __ StoreTypedElement(Map(node->InputAt(0)), Map(node->InputAt(1)),
+                           Map(node->InputAt(2)), Map(node->InputAt(3)),
+                           Map(node->InputAt(4)),
+                           ExternalArrayTypeOf(node->op()));
+      return OpIndex::Invalid();
+    case IrOpcode::kStoreDataViewElement:
+      __ StoreDataViewElement(Map(node->InputAt(0)), Map(node->InputAt(1)),
+                              Map(node->InputAt(2)), Map(node->InputAt(3)),
+                              Map(node->InputAt(4)),
+                              ExternalArrayTypeOf(node->op()));
+      return OpIndex::Invalid();
+    case IrOpcode::kStoreSignedSmallElement:
+      __ StoreSignedSmallElement(Map(node->InputAt(0)), Map(node->InputAt(1)),
+                                 Map(node->InputAt(2)));
+      return OpIndex::Invalid();
+
+    case IrOpcode::kCompareMaps: {
+      const ZoneRefSet<v8::internal::Map>& maps =
+          CompareMapsParametersOf(node->op());
+      return __ CompareMaps(Map(node->InputAt(0)), maps);
+    }
+
+    case IrOpcode::kCheckMaps: {
+      DCHECK(dominating_frame_state.valid());
+      const auto& p = CheckMapsParametersOf(node->op());
+      __ CheckMaps(Map(node->InputAt(0)), dominating_frame_state, p.maps(),
+                   p.flags(), p.feedback());
+      return OpIndex{};
+    }
+
+    case IrOpcode::kCheckedUint32Bounds:
+    case IrOpcode::kCheckedUint64Bounds: {
+      WordRepresentation rep = node->opcode() == IrOpcode::kCheckedUint32Bounds
+                                   ? WordRepresentation::Word32()
+                                   : WordRepresentation::Word64();
+      const CheckBoundsParameters& params = CheckBoundsParametersOf(node->op());
+      OpIndex index = Map(node->InputAt(0));
+      OpIndex limit = Map(node->InputAt(1));
+      V<Word32> check = __ UintLessThan(index, limit, rep);
+      if ((params.flags() & CheckBoundsFlag::kAbortOnOutOfBounds) != 0) {
+        IF_NOT(LIKELY(check)) { __ Unreachable(); }
+        END_IF
+      } else {
+        DCHECK(dominating_frame_state.valid());
+        __ DeoptimizeIfNot(check, dominating_frame_state,
+                           DeoptimizeReason::kOutOfBounds,
+                           params.check_parameters().feedback());
+      }
+      return index;
+    }
+
+    case IrOpcode::kCheckIf: {
+      DCHECK(dominating_frame_state.valid());
+      const CheckIfParameters& params = CheckIfParametersOf(node->op());
+      __ DeoptimizeIfNot(Map(node->InputAt(0)), dominating_frame_state,
+                         params.reason(), params.feedback());
+      return OpIndex::Invalid();
+    }
+
+    case IrOpcode::kCheckEqualsSymbol:
+      DCHECK(dominating_frame_state.valid());
+      __ DeoptimizeIfNot(
+          __ TaggedEqual(Map(node->InputAt(0)), Map(node->InputAt(1))),
+          dominating_frame_state, DeoptimizeReason::kWrongName,
+          FeedbackSource{});
+      return OpIndex::Invalid();
+
+    case IrOpcode::kCheckEqualsInternalizedString:
+      DCHECK(dominating_frame_state.valid());
+      __ CheckEqualsInternalizedString(
+          Map(node->InputAt(0)), Map(node->InputAt(1)), dominating_frame_state);
+      return OpIndex::Invalid();
+
+    case IrOpcode::kLoadMessage:
+      return __ LoadMessage(Map(node->InputAt(0)));
+    case IrOpcode::kStoreMessage:
+      __ StoreMessage(Map(node->InputAt(0)), Map(node->InputAt(1)));
+      return OpIndex::Invalid();
+
+    case IrOpcode::kSameValue:
+      return __ SameValue(Map(node->InputAt(0)), Map(node->InputAt(1)),
+                          SameValueOp::Mode::kSameValue);
+    case IrOpcode::kSameValueNumbersOnly:
+      return __ SameValue(Map(node->InputAt(0)), Map(node->InputAt(1)),
+                          SameValueOp::Mode::kSameValueNumbersOnly);
+    case IrOpcode::kNumberSameValue:
+      return __ Float64SameValue(Map(node->InputAt(0)), Map(node->InputAt(1)));
+
+    case IrOpcode::kFastApiCall: {
+      DCHECK(dominating_frame_state.valid());
+      FastApiCallNode n(node);
+      const auto& params = n.Parameters();
+      const FastApiCallFunctionVector& c_functions = params.c_functions();
+      const int c_arg_count = params.argument_count();
+
+      base::SmallVector<OpIndex, 16> slow_call_arguments;
+      DCHECK_EQ(node->op()->ValueInputCount() - c_arg_count,
+                n.SlowCallArgumentCount());
+      OpIndex slow_call_callee = Map(n.SlowCallArgument(0));
+      for (int i = 1; i < n.SlowCallArgumentCount(); ++i) {
+        slow_call_arguments.push_back(Map(n.SlowCallArgument(i)));
+      }
+
+      // Overload resolution.
+      auto resolution_result =
+          fast_api_call::OverloadsResolutionResult::Invalid();
+      if (c_functions.size() != 1) {
+        DCHECK_EQ(c_functions.size(), 2);
+        resolution_result =
+            fast_api_call::ResolveOverloads(c_functions, c_arg_count);
+        if (!resolution_result.is_valid()) {
+          return __ Call(
+              slow_call_callee, dominating_frame_state,
+              base::VectorOf(slow_call_arguments),
+              TSCallDescriptor::Create(params.descriptor(), __ graph_zone()));
+        }
+      }
+
+      // Prepare FastCallApiOp parameters.
+      base::SmallVector<OpIndex, 16> arguments;
+      for (int i = 0; i < c_arg_count; ++i) {
+        arguments.push_back(Map(NodeProperties::GetValueInput(node, i)));
+      }
+      OpIndex data_argument =
+          Map(n.SlowCallArgument(FastApiCallNode::kSlowCallDataArgumentIndex));
+      const FastApiCallParameters* parameters = FastApiCallParameters::Create(
+          c_functions, resolution_result, __ graph_zone());
+
+      Label<Object> done(this);
+
+      OpIndex fast_call_result =
+          __ FastApiCall(data_argument, base::VectorOf(arguments), parameters);
+      V<Word32> result_state =
+          __ template Projection<Word32>(fast_call_result, 0);
+
+      IF(LIKELY(__ Word32Equal(result_state, FastApiCallOp::kSuccessValue))) {
+        GOTO(done, __ template Projection<Object>(fast_call_result, 1));
+      }
+      ELSE {
+        // We need to generate a fallback (both fast and slow call) in case:
+        // 1) the generated code might fail, in case e.g. a Smi was passed where
+        // a JSObject was expected and an error must be thrown or
+        // 2) the embedder requested fallback possibility via providing options
+        // arg. None of the above usually holds true for Wasm functions with
+        // primitive types only, so we avoid generating an extra branch here.
+        V<Object> slow_call_result = __ Call(
+            slow_call_callee, dominating_frame_state,
+            base::VectorOf(slow_call_arguments),
+            TSCallDescriptor::Create(params.descriptor(), __ graph_zone()));
+        GOTO(done, slow_call_result);
+      }
+      END_IF
+
+      BIND(done, result);
+      return result;
+    }
+
+    case IrOpcode::kRuntimeAbort:
+      __ RuntimeAbort(AbortReasonOf(node->op()));
+      return OpIndex::Invalid();
+
+    case IrOpcode::kDateNow:
+      return __ CallRuntime_DateCurrentTime(isolate, __ NoContextConstant());
 
     case IrOpcode::kBeginRegion:
       return OpIndex::Invalid();

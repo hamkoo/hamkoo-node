@@ -75,21 +75,20 @@ Handle<AccessorPair> FactoryBase<Impl>::NewAccessorPair() {
 
 template <typename Impl>
 Handle<Code> FactoryBase<Impl>::NewCode(const NewCodeOptions& options) {
+  Isolate* isolate_for_sandbox = impl()->isolate_for_sandbox();
   Map map = read_only_roots().code_map();
   int size = map.instance_size();
   DCHECK_NE(options.allocation, AllocationType::kYoung);
   Code code =
       Code::cast(AllocateRawWithImmortalMap(size, options.allocation, map));
   DisallowGarbageCollection no_gc;
-  code.initialize_flags(options.kind, options.builtin, options.is_turbofanned,
+  code.initialize_flags(options.kind, options.is_turbofanned,
                         options.stack_slots);
-  code.set_kind_specific_flags(options.kind_specific_flags, kRelaxedStore);
-  Isolate* isolate_for_sandbox = impl()->isolate_for_sandbox();
+  code.set_builtin_id(options.builtin);
   code.set_raw_instruction_stream(Smi::zero(), SKIP_WRITE_BARRIER);
-  code.init_code_entry_point(isolate_for_sandbox, kNullAddress);
+  code.init_instruction_start(isolate_for_sandbox, kNullAddress);
   code.set_instruction_size(options.instruction_size);
   code.set_metadata_size(options.metadata_size);
-  code.set_relocation_info(*options.reloc_info);
   code.set_inlined_bytecode_size(options.inlined_bytecode_size);
   code.set_osr_offset(options.osr_offset);
   code.set_handler_table_offset(options.handler_table_offset);

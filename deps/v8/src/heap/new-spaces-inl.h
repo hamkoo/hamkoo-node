@@ -109,11 +109,14 @@ V8_INLINE bool PagedSpaceForNewSpace::EnsureAllocation(
   if (!PagedSpaceBase::EnsureAllocation(size_in_bytes, alignment, origin,
                                         out_max_aligned_size)) {
     if (!AddPageBeyondCapacity(size_in_bytes, origin)) {
-      return false;
+      if (!WaitForSweepingForAllocation(size_in_bytes, origin)) {
+        return false;
+      }
     }
   }
 
   allocated_linear_areas_ += limit() - top();
+  last_lab_page_ = Page::FromAllocationAreaAddress(top());
   return true;
 }
 

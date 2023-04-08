@@ -738,6 +738,9 @@ class WasmGraphBuildingInterface {
       case WKI::kUninstantiated:
       case WKI::kGeneric:
         return false;
+      case WKI::kIntToString:
+        result = builder_->WellKnown_IntToString(args[0].node, args[1].node);
+        break;
       case WKI::kStringToLowerCaseStringref:
         result = builder_->WellKnown_StringToLowerCaseStringref(
             args[0].node, NullCheckFor(args[0].type));
@@ -745,10 +748,6 @@ class WasmGraphBuildingInterface {
     }
     assumptions_->RecordAssumption(index, import);
     SetAndTypeNode(&returns[0], result);
-    if (v8_flags.trace_wasm_inlining) {
-      PrintF("[function %d: import %d is well-known built-in %s]\n",
-             func_index_, index, WellKnownImportName(import));
-    }
     return true;
   }
 
@@ -821,8 +820,8 @@ class WasmGraphBuildingInterface {
     for (int i = 0; i < num_cases; i++) {
       const uint32_t expected_function_index = feedback->function_index(i);
 
-      if (v8_flags.trace_wasm_speculative_inlining) {
-        PrintF("[Function #%d call #%d: graph support for inlining #%d]\n",
+      if (v8_flags.trace_wasm_inlining) {
+        PrintF("[function %d: call #%d: graph support for inlining #%d]\n",
                func_index_, feedback_instruction_index_ - 1,
                expected_function_index);
       }
@@ -913,8 +912,8 @@ class WasmGraphBuildingInterface {
     for (int i = 0; i < num_cases; i++) {
       const uint32_t expected_function_index = feedback->function_index(i);
 
-      if (v8_flags.trace_wasm_speculative_inlining) {
-        PrintF("[Function #%d call #%d: graph support for inlining #%d]\n",
+      if (v8_flags.trace_wasm_inlining) {
+        PrintF("[function %d: call #%d: graph support for inlining #%d]\n",
                func_index_, feedback_instruction_index_ - 1,
                expected_function_index);
       }
@@ -1299,12 +1298,22 @@ class WasmGraphBuildingInterface {
 
   void ArrayNewSegment(FullDecoder* decoder,
                        const ArrayIndexImmediate& array_imm,
-                       const IndexImmediate& data_segment, const Value& offset,
+                       const IndexImmediate& segment_imm, const Value& offset,
                        const Value& length, const Value& rtt, Value* result) {
     SetAndTypeNode(result,
                    builder_->ArrayNewSegment(
-                       array_imm.array_type, data_segment.index, offset.node,
+                       array_imm.array_type, segment_imm.index, offset.node,
                        length.node, rtt.node, decoder->position()));
+  }
+
+  void ArrayInitSegment(FullDecoder* decoder,
+                        const ArrayIndexImmediate& array_imm,
+                        const IndexImmediate& segment_imm, const Value& array,
+                        const Value& array_index, const Value& segment_offset,
+                        const Value& length) {
+    builder_->ArrayInitSegment(
+        array_imm.array_type, segment_imm.index, array.node, array_index.node,
+        segment_offset.node, length.node, decoder->position());
   }
 
   void I31New(FullDecoder* decoder, const Value& input, Value* result) {

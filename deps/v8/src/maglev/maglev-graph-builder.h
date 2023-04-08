@@ -32,6 +32,7 @@
 #include "src/maglev/maglev-graph.h"
 #include "src/maglev/maglev-interpreter-frame-state.h"
 #include "src/maglev/maglev-ir.h"
+#include "src/objects/bytecode-array.h"
 #include "src/objects/elements-kind.h"
 #include "src/utils/memcopy.h"
 
@@ -41,7 +42,7 @@ namespace maglev {
 
 class CallArguments;
 
-class ReduceResult {
+class V8_NODISCARD ReduceResult {
  public:
   enum Kind {
     kDoneWithValue = 0,  // No need to mask while returning the pointer.
@@ -171,6 +172,14 @@ struct FastLiteralField {
     }                          \
   } while (false)
 
+#define RETURN_VOID_IF_DONE(result) \
+  do {                              \
+    auto res = result;              \
+    if (res.IsDone()) {             \
+      return;                       \
+    }                               \
+  } while (false)
+
 #define PROCESS_AND_RETURN_IF_DONE(result, value_processor) \
   do {                                                      \
     auto res = result;                                      \
@@ -186,6 +195,15 @@ struct FastLiteralField {
   if (result.IsDoneWithAbort()) {         \
     return ReduceResult::DoneWithAbort(); \
   }
+
+enum class ToNumberHint {
+  kDisallowToNumber,
+  kAssumeSmi,
+  kAssumeNumber,
+  kAssumeNumberOrOddball
+};
+
+enum class UseReprHintRecording { kRecord, kDoNotRecord };
 
 class MaglevGraphBuilder {
  public:
@@ -293,21 +311,13 @@ class MaglevGraphBuilder {
   bool ShouldEmitInterruptBudgetChecks() {
     return v8_flags.force_emit_interrupt_budget_checks || v8_flags.turbofan;
   }
-  BasicBlock* CreateEdgeSplitBlock(int offset,
-                                   int interrupt_budget_correction) {
+  bool MaglevIsTopTier() const { return !v8_flags.turbofan && v8_flags.maglev; }
+  BasicBlock* CreateEdgeSplitBlock(int offset) {
     if (v8_flags.trace_maglev_graph_building) {
       std::cout << "== New empty block ==" << std::endl;
     }
     DCHECK_NULL(current_block_);
-    current_block_ = zone()->New<BasicBlock>(nullptr);
-    // Add an interrupt budget correction if necessary. This makes the edge
-    // split block no longer empty, which is unexpected, but we're not changing
-    // interpreter frame state, so that's ok.
-    if (v8_flags.maglev_increase_budget_forward_jump &&
-        ShouldEmitInterruptBudgetChecks() && interrupt_budget_correction != 0) {
-      DCHECK_GT(interrupt_budget_correction, 0);
-      AddNewNode<IncreaseInterruptBudget>({}, interrupt_budget_correction);
-    }
+    current_block_ = zone()->New<BasicBlock>(nullptr, zone());
     BasicBlock* result = FinishBlock<Jump>({}, &jump_targets_[offset]);
     result->set_edge_split_block();
 #ifdef DEBUG
@@ -367,8 +377,7 @@ class MaglevGraphBuilder {
       ControlNode* control = predecessor->control_node();
       if (control->Is<ConditionalControlNode>()) {
         // CreateEmptyBlock automatically registers itself with the offset.
-        predecessor = CreateEdgeSplitBlock(
-            offset, old_jump_targets->interrupt_budget_correction());
+        predecessor = CreateEdgeSplitBlock(offset);
         // Set the old predecessor's (the conditional block) reference to
         // point to the new empty predecessor block.
         old_jump_targets =
@@ -846,9 +855,9 @@ class MaglevGraphBuilder {
                                  : RootIndex::kFalseValue);
   }
 
-  ValueNode* GetConstant(const compiler::ObjectRef& ref) {
+  ValueNode* GetConstant(compiler::ObjectRef ref) {
     if (ref.IsSmi()) return GetSmiConstant(ref.AsSmi());
-    const compiler::HeapObjectRef& constant = ref.AsHeapObject();
+    compiler::HeapObjectRef constant = ref.AsHeapObject();
 
     auto root_index = broker()->FindRootIndex(constant);
     if (root_index.has_value()) {
@@ -892,7 +901,9 @@ class MaglevGraphBuilder {
     current_interpreter_frame_.set(dst, current_interpreter_frame_.get(src));
   }
 
-  ValueNode* GetTaggedValue(ValueNode* value);
+  ValueNode* GetTaggedValue(ValueNode* value,
+                            UseReprHintRecording record_use_repr_hint =
+                                UseReprHintRecording::kRecord);
 
   ValueNode* GetTaggedValue(interpreter::Register reg) {
     ValueNode* value = current_interpreter_frame_.get(reg);
@@ -906,28 +917,38 @@ class MaglevGraphBuilder {
 
   ValueNode* GetInternalizedString(interpreter::Register reg);
 
-  ValueNode* GetTruncatedInt32FromNumber(
-      ValueNode* value, TaggedToFloat64ConversionType conversion_type);
+  // Get an Int32 representation node whose value is equivalent to the ToInt32
+  // truncation of the given node (including a ToNumber call). Only trivial
+  // ToNumber is allowed -- values that are already numeric, and optionally
+  // oddballs.
+  //
+  // Deopts if the ToNumber is non-trivial.
+  ValueNode* GetTruncatedInt32ForToNumber(ValueNode* value, ToNumberHint hint);
 
-  ValueNode* GetTruncatedInt32FromNumber(
-      interpreter::Register reg,
-      TaggedToFloat64ConversionType conversion_type) {
-    return GetTruncatedInt32FromNumber(current_interpreter_frame_.get(reg),
-                                       conversion_type);
+  ValueNode* GetTruncatedInt32ForToNumber(interpreter::Register reg,
+                                          ToNumberHint hint) {
+    return GetTruncatedInt32ForToNumber(current_interpreter_frame_.get(reg),
+                                        hint);
   }
 
-  ValueNode* GetUint32ClampedFromNumber(ValueNode* value);
+  // Get an Int32 representation node whose value is equivalent to the ToUint8
+  // truncation of the given node (including a ToNumber call). Only trivial
+  // ToNumber is allowed -- values that are already numeric, and optionally
+  // oddballs.
+  //
+  // Deopts if the ToNumber is non-trivial.
+  ValueNode* GetUint8ClampedForToNumber(ValueNode* value, ToNumberHint hint);
 
-  ValueNode* GetUint32ClampedFromNumber(interpreter::Register reg) {
-    return GetUint32ClampedFromNumber(current_interpreter_frame_.get(reg));
+  ValueNode* GetUint8ClampedForToNumber(interpreter::Register reg,
+                                        ToNumberHint hint) {
+    return GetUint8ClampedForToNumber(current_interpreter_frame_.get(reg),
+                                      hint);
   }
 
-  ValueNode* GetTruncatedInt32(ValueNode* node);
-
-  ValueNode* GetTruncatedInt32(interpreter::Register reg) {
-    return GetTruncatedInt32(current_interpreter_frame_.get(reg));
-  }
-
+  // Get an Int32 representation node whose value is equivalent to the given
+  // node.
+  //
+  // Deopts if the value is not exactly representable as an Int32.
   ValueNode* GetInt32(ValueNode* value);
 
   ValueNode* GetInt32(interpreter::Register reg) {
@@ -935,12 +956,35 @@ class MaglevGraphBuilder {
     return GetInt32(value);
   }
 
-  ValueNode* GetFloat64(ValueNode* value,
-                        TaggedToFloat64ConversionType conversion_type);
+  // Get a Float64 representation node whose value is equivalent to the given
+  // node.
+  //
+  // Deopts if the value is not exactly representable as a Float64.
+  ValueNode* GetFloat64(ValueNode* value);
 
-  ValueNode* GetFloat64(interpreter::Register reg,
-                        TaggedToFloat64ConversionType conversion_type) {
-    return GetFloat64(current_interpreter_frame_.get(reg), conversion_type);
+  ValueNode* GetFloat64(interpreter::Register reg) {
+    return GetFloat64(current_interpreter_frame_.get(reg));
+  }
+
+  // Get a Float64 representation node whose value is the result of ToNumber on
+  // the given node. Only trivial ToNumber is allowed -- values that are already
+  // numeric, and optionally oddballs.
+  //
+  // Deopts if the ToNumber value is not exactly representable as a Float64, or
+  // the ToNumber is non-trivial.
+  ValueNode* GetFloat64ForToNumber(ValueNode* value, ToNumberHint hint);
+
+  ValueNode* GetFloat64ForToNumber(interpreter::Register reg,
+                                   ToNumberHint hint) {
+    return GetFloat64ForToNumber(current_interpreter_frame_.get(reg), hint);
+  }
+
+  ValueNode* GetHoleyFloat64ForToNumber(ValueNode* value, ToNumberHint hint);
+
+  ValueNode* GetHoleyFloat64ForToNumber(interpreter::Register reg,
+                                        ToNumberHint hint) {
+    return GetHoleyFloat64ForToNumber(current_interpreter_frame_.get(reg),
+                                      hint);
   }
 
   ValueNode* GetRawAccumulator() {
@@ -956,34 +1000,45 @@ class MaglevGraphBuilder {
     return GetInt32(interpreter::Register::virtual_accumulator());
   }
 
-  ValueNode* GetAccumulatorTruncatedInt32() {
-    return GetTruncatedInt32(interpreter::Register::virtual_accumulator());
+  ValueNode* GetAccumulatorTruncatedInt32ForToNumber(ToNumberHint hint) {
+    return GetTruncatedInt32ForToNumber(
+        interpreter::Register::virtual_accumulator(), hint);
   }
 
-  ValueNode* GetAccumulatorTruncatedInt32FromNumber(
-      TaggedToFloat64ConversionType conversion_type) {
-    return GetTruncatedInt32FromNumber(
-        interpreter::Register::virtual_accumulator(), conversion_type);
+  ValueNode* GetAccumulatorUint8ClampedForToNumber(ToNumberHint hint) {
+    return GetUint8ClampedForToNumber(
+        interpreter::Register::virtual_accumulator(), hint);
   }
 
-  ValueNode* GetAccumulatorUint32ClampedFromNumber() {
-    return GetUint32ClampedFromNumber(
-        interpreter::Register::virtual_accumulator());
+  ValueNode* GetAccumulatorFloat64() {
+    return GetFloat64(interpreter::Register::virtual_accumulator());
   }
 
-  ValueNode* GetAccumulatorFloat64(
-      TaggedToFloat64ConversionType conversion_type) {
-    return GetFloat64(interpreter::Register::virtual_accumulator(),
-                      conversion_type);
+  ValueNode* GetAccumulatorFloat64ForToNumber(ToNumberHint hint) {
+    return GetFloat64ForToNumber(interpreter::Register::virtual_accumulator(),
+                                 hint);
+  }
+
+  ValueNode* GetAccumulatorHoleyFloat64ForToNumber(ToNumberHint hint) {
+    return GetHoleyFloat64ForToNumber(
+        interpreter::Register::virtual_accumulator(), hint);
   }
 
   ValueNode* GetSilencedNaN(ValueNode* value) {
     DCHECK_EQ(value->properties().value_representation(),
               ValueRepresentation::kFloat64);
 
-    // We only need to check for silenced NaN in non-conversion nodes, since
-    // conversions can't be signalling NaNs.
-    if (value->properties().is_conversion()) return value;
+    // We only need to check for silenced NaN in non-conversion nodes or
+    // conversion from tagged, since they can't be signalling NaNs.
+    if (value->properties().is_conversion()) {
+      // A conversion node should have at least one input.
+      DCHECK_GE(value->input_count(), 1);
+      // If the conversion node is tagged, we could be reading a fabricated sNaN
+      // value (built using a BufferArray for example).
+      if (!value->input(0).node()->properties().is_tagged()) {
+        return value;
+      }
+    }
 
     // Special case constants, since we know what they are.
     Float64Constant* constant = value->TryCast<Float64Constant>();
@@ -994,7 +1049,7 @@ class MaglevGraphBuilder {
     }
 
     // Silence all other values.
-    return AddNewNode<Float64SilenceNaN>({value});
+    return AddNewNode<HoleyFloat64ToMaybeNanFloat64>({value});
   }
 
   bool IsRegisterEqualToAccumulator(int operand_index) {
@@ -1016,14 +1071,20 @@ class MaglevGraphBuilder {
     return GetInt32(iterator_.GetRegisterOperand(operand_index));
   }
 
-  ValueNode* LoadRegisterTruncatedInt32(int operand_index) {
-    return GetTruncatedInt32(iterator_.GetRegisterOperand(operand_index));
+  ValueNode* LoadRegisterFloat64(int operand_index) {
+    return GetFloat64(iterator_.GetRegisterOperand(operand_index));
   }
 
-  ValueNode* LoadRegisterFloat64(
-      int operand_index, TaggedToFloat64ConversionType conversion_type) {
-    return GetFloat64(iterator_.GetRegisterOperand(operand_index),
-                      conversion_type);
+  ValueNode* LoadRegisterFloat64ForToNumber(int operand_index,
+                                            ToNumberHint hint) {
+    return GetFloat64ForToNumber(iterator_.GetRegisterOperand(operand_index),
+                                 hint);
+  }
+
+  ValueNode* LoadRegisterHoleyFloat64ForToNumber(int operand_index,
+                                                 ToNumberHint hint) {
+    return GetHoleyFloat64ForToNumber(
+        iterator_.GetRegisterOperand(operand_index), hint);
   }
 
   ValueNode* BuildLoadFixedArrayElement(ValueNode* node, int index) {
@@ -1134,7 +1195,10 @@ class MaglevGraphBuilder {
     //   * CheckMapsWithMigration -- this only migrates representations of
     //     values, not the values themselves, so cached values are still valid.
     static constexpr bool should_clear_unstable_node_aspects =
-        !is_simple_field_store &&
+        // TODO(leszeks): Optimizing for simple stores is currently broken,
+        // as there is no alias analysis to ensure that a store can't modify
+        // an aliasing object.
+        /* !is_simple_field_store &&*/
         !std::is_same_v<NodeT, CheckMapsWithMigration>;
 
     // Simple field stores can't possibly change or migrate the map.
@@ -1199,7 +1263,7 @@ class MaglevGraphBuilder {
 
   void StartNewBlock(int offset) {
     DCHECK_NULL(current_block_);
-    current_block_ = zone()->New<BasicBlock>(merge_states_[offset]);
+    current_block_ = zone()->New<BasicBlock>(merge_states_[offset], zone());
     ResolveJumpsToBlockAtOffset(current_block_, offset);
   }
 
@@ -1234,21 +1298,11 @@ class MaglevGraphBuilder {
   // Update all jumps which were targetting the not-yet-created block at the
   // given `block_offset`, to now point to the given `block`.
   void ResolveJumpsToBlockAtOffset(BasicBlock* block, int block_offset) {
-    int interrupt_budget_correction = 0;
     BasicBlockRef* jump_target_refs_head =
         jump_targets_[block_offset].SetToBlockAndReturnNext(block);
     while (jump_target_refs_head != nullptr) {
-      // Only one jump target should ever set the interrupt budget correction.
-      DCHECK_EQ(interrupt_budget_correction, 0);
-      interrupt_budget_correction =
-          jump_target_refs_head->interrupt_budget_correction();
       jump_target_refs_head =
           jump_target_refs_head->SetToBlockAndReturnNext(block);
-    }
-    if (v8_flags.maglev_increase_budget_forward_jump &&
-        ShouldEmitInterruptBudgetChecks() && interrupt_budget_correction != 0) {
-      DCHECK_GT(interrupt_budget_correction, 0);
-      AddNewNode<IncreaseInterruptBudget>({}, interrupt_budget_correction);
     }
     DCHECK_EQ(jump_targets_[block_offset].block_ptr(), block);
   }
@@ -1381,11 +1435,20 @@ class MaglevGraphBuilder {
   void BuildCallFromRegisters(int argc_count,
                               ConvertReceiverMode receiver_mode);
 
-  bool TryBuildScriptContextConstantAccess(
+  ReduceResult TryBuildScriptContextStore(
       const compiler::GlobalAccessFeedback& global_access_feedback);
-  bool TryBuildScriptContextAccess(
+  ReduceResult TryBuildPropertyCellStore(
       const compiler::GlobalAccessFeedback& global_access_feedback);
-  bool TryBuildPropertyCellAccess(
+  ReduceResult TryBuildGlobalStore(
+      const compiler::GlobalAccessFeedback& global_access_feedback);
+
+  ReduceResult TryBuildScriptContextConstantLoad(
+      const compiler::GlobalAccessFeedback& global_access_feedback);
+  ReduceResult TryBuildScriptContextLoad(
+      const compiler::GlobalAccessFeedback& global_access_feedback);
+  ReduceResult TryBuildPropertyCellLoad(
+      const compiler::GlobalAccessFeedback& global_access_feedback);
+  ReduceResult TryBuildGlobalLoad(
       const compiler::GlobalAccessFeedback& global_access_feedback);
 
   ValueNode* BuildSmiUntag(ValueNode* node);
@@ -1401,8 +1464,8 @@ class MaglevGraphBuilder {
                       base::Vector<const compiler::MapRef> maps);
   // Emits an unconditional deopt and returns false if the node is a constant
   // that doesn't match the ref.
-  ReduceResult BuildCheckValue(ValueNode* node,
-                               const compiler::HeapObjectRef& ref);
+  ReduceResult BuildCheckValue(ValueNode* node, compiler::ObjectRef ref);
+  ReduceResult BuildCheckValue(ValueNode* node, compiler::HeapObjectRef ref);
 
   bool CanElideWriteBarrier(ValueNode* object, ValueNode* value);
   void BuildStoreTaggedField(ValueNode* object, ValueNode* value, int offset);
@@ -1488,8 +1551,8 @@ class MaglevGraphBuilder {
   void RecordKnownProperty(ValueNode* lookup_start_object,
                            compiler::NameRef name, ValueNode* value,
                            compiler::PropertyAccessInfo const& access_info);
-  bool TryReuseKnownPropertyLoad(ValueNode* lookup_start_object,
-                                 compiler::NameRef name);
+  ReduceResult TryReuseKnownPropertyLoad(ValueNode* lookup_start_object,
+                                         compiler::NameRef name);
 
   enum InferHasInPrototypeChainResult {
     kMayBeInPrototypeChain,
@@ -1498,20 +1561,20 @@ class MaglevGraphBuilder {
   };
   InferHasInPrototypeChainResult InferHasInPrototypeChain(
       ValueNode* receiver, compiler::HeapObjectRef prototype);
-  bool TryBuildFastHasInPrototypeChain(ValueNode* object,
-                                       compiler::ObjectRef prototype);
-  void BuildHasInPrototypeChain(ValueNode* object,
-                                compiler::ObjectRef prototype);
-  bool TryBuildFastOrdinaryHasInstance(ValueNode* object,
-                                       compiler::JSObjectRef callable,
-                                       ValueNode* callable_node);
-  void BuildOrdinaryHasInstance(ValueNode* object,
-                                compiler::JSObjectRef callable,
-                                ValueNode* callable_node);
-  bool TryBuildFastInstanceOf(ValueNode* object,
-                              compiler::JSObjectRef callable_ref,
-                              ValueNode* callable_node);
-  bool TryBuildFastInstanceOfWithFeedback(
+  ReduceResult TryBuildFastHasInPrototypeChain(ValueNode* object,
+                                               compiler::ObjectRef prototype);
+  ReduceResult BuildHasInPrototypeChain(ValueNode* object,
+                                        compiler::ObjectRef prototype);
+  ReduceResult TryBuildFastOrdinaryHasInstance(ValueNode* object,
+                                               compiler::JSObjectRef callable,
+                                               ValueNode* callable_node);
+  ReduceResult BuildOrdinaryHasInstance(ValueNode* object,
+                                        compiler::JSObjectRef callable,
+                                        ValueNode* callable_node);
+  ReduceResult TryBuildFastInstanceOf(ValueNode* object,
+                                      compiler::JSObjectRef callable_ref,
+                                      ValueNode* callable_node);
+  ReduceResult TryBuildFastInstanceOfWithFeedback(
       ValueNode* object, ValueNode* callable,
       compiler::FeedbackSource feedback_source);
 
@@ -1545,27 +1608,21 @@ class MaglevGraphBuilder {
 
   template <Operation kOperation>
   void BuildInt32UnaryOperationNode();
-  void BuildTruncatingInt32BitwiseNotForNumber(
-      TaggedToFloat64ConversionType conversion_type);
+  void BuildTruncatingInt32BitwiseNotForToNumber(ToNumberHint hint);
   template <Operation kOperation>
   void BuildInt32BinaryOperationNode();
   template <Operation kOperation>
   void BuildInt32BinarySmiOperationNode();
   template <Operation kOperation>
-  void BuildTruncatingInt32BinaryOperationNodeForNumber(
-      TaggedToFloat64ConversionType conversion_type);
+  void BuildTruncatingInt32BinaryOperationNodeForToNumber(ToNumberHint hint);
   template <Operation kOperation>
-  void BuildTruncatingInt32BinarySmiOperationNodeForNumber(
-      TaggedToFloat64ConversionType conversion_type);
+  void BuildTruncatingInt32BinarySmiOperationNodeForToNumber(ToNumberHint hint);
   template <Operation kOperation>
-  void BuildFloat64UnaryOperationNode(
-      TaggedToFloat64ConversionType conversion_type);
+  void BuildFloat64UnaryOperationNodeForToNumber(ToNumberHint hint);
   template <Operation kOperation>
-  void BuildFloat64BinaryOperationNode(
-      TaggedToFloat64ConversionType conversion_type);
+  void BuildFloat64BinaryOperationNodeForToNumber(ToNumberHint hint);
   template <Operation kOperation>
-  void BuildFloat64BinarySmiOperationNode(
-      TaggedToFloat64ConversionType conversion_type);
+  void BuildFloat64BinarySmiOperationNodeForToNumber(ToNumberHint hint);
 
   template <Operation kOperation>
   void VisitUnaryOperation();
@@ -1634,7 +1691,7 @@ class MaglevGraphBuilder {
   int NumPredecessors(int offset) { return predecessors_[offset]; }
 
   compiler::JSHeapBroker* broker() const { return broker_; }
-  const compiler::FeedbackVectorRef& feedback() const {
+  compiler::FeedbackVectorRef feedback() const {
     return compilation_unit_->feedback();
   }
   const FeedbackNexus FeedbackNexusForOperand(int slot_operand_index) const {
@@ -1646,10 +1703,10 @@ class MaglevGraphBuilder {
     return FeedbackNexus(feedback().object(), slot,
                          broker()->feedback_nexus_config());
   }
-  const compiler::BytecodeArrayRef& bytecode() const {
+  compiler::BytecodeArrayRef bytecode() const {
     return compilation_unit_->bytecode();
   }
-  const compiler::JSFunctionRef& function() const {
+  compiler::JSFunctionRef function() const {
     return compilation_unit_->function();
   }
   const compiler::BytecodeAnalysis& bytecode_analysis() const {

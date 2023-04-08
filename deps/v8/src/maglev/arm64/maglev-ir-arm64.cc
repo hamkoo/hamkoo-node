@@ -331,12 +331,12 @@ void CheckMaps::GenerateCode(MaglevAssembler* masm,
   __ LoadMap(object_map, object);
   size_t map_count = maps().size();
   for (size_t i = 0; i < map_count - 1; ++i) {
-    Handle<Map> map_handle = maps().at(i);
+    Handle<Map> map_handle = maps().at(i).object();
     __ Move(map, map_handle);
     __ CmpTagged(object_map, map);
     __ B(&done, eq);
   }
-  Handle<Map> last_map_handle = maps().at(map_count - 1);
+  Handle<Map> last_map_handle = maps().at(map_count - 1).object();
   __ Move(map, last_map_handle);
   __ CmpTagged(object_map, map);
   __ EmitEagerDeoptIf(ne, DeoptimizeReason::kWrongMap, this);
@@ -386,7 +386,7 @@ void CheckMapsWithMigration::GenerateCode(MaglevAssembler* masm,
   size_t map_count = maps().size();
   for (size_t i = 0; i < map_count; ++i) {
     ZoneLabelRef continue_label(masm);
-    Handle<Map> map_handle = maps().at(i);
+    Handle<Map> map_handle = maps().at(i).object();
     {
       Register map = scratch;
       __ Move(map, map_handle);
@@ -442,7 +442,7 @@ void CheckMapsWithMigration::GenerateCode(MaglevAssembler* masm,
             // The migrated object is returned on success, retry the map check.
             __ Move(object, return_val);
             __ LoadMap(object_map, object);
-            __ Move(scratch, node->maps().at(map_index));
+            __ Move(scratch, node->maps().at(map_index).object());
             __ CmpTagged(object_map, scratch);
             __ B(*done, eq);
             __ B(*continue_label);
@@ -1052,16 +1052,6 @@ void Float64Ieee754Unary::GenerateCode(MaglevAssembler* masm,
   __ CallCFunction(ieee_function_, 1);
 }
 
-void Float64SilenceNaN::SetValueLocationConstraints() {
-  UseRegister(input());
-  DefineAsRegister(this);
-}
-
-void Float64SilenceNaN::GenerateCode(MaglevAssembler* masm,
-                                     const ProcessingState& state) {
-  __ CanonicalizeNaN(ToDoubleRegister(result()), ToDoubleRegister(input()));
-}
-
 template <class Derived, Operation kOperation>
 void Float64CompareNode<Derived, kOperation>::SetValueLocationConstraints() {
   UseRegister(left_input());
@@ -1313,7 +1303,7 @@ void JumpToFailIfNotHeapNumberOrOddball(
         }
       }
       break;
-    case TaggedToFloat64ConversionType::kNumber:
+    case TaggedToFloat64ConversionType::kOnlyNumber:
       // Check if HeapNumber, jump to fail otherwise.
       if (fail) {
         __ IsObjectType(value, InstanceType::HEAP_NUMBER_TYPE);
@@ -1424,28 +1414,20 @@ void TruncateNumberOrOddballToInt32::GenerateCode(
   Register value = ToRegister(input());
   Register result_reg = ToRegister(result());
   DCHECK_EQ(value, result_reg);
-  EmitTruncateNumberOrOddballToInt32(masm, value, result_reg, conversion_type(),
-                                     nullptr);
+  EmitTruncateNumberOrOddballToInt32(
+      masm, value, result_reg, TaggedToFloat64ConversionType::kNumberOrOddball,
+      nullptr);
 }
 
-void IncreaseInterruptBudget::SetValueLocationConstraints() {
-  set_temporaries_needed(1);
+void HoleyFloat64ToMaybeNanFloat64::SetValueLocationConstraints() {
+  UseRegister(input());
+  DefineAsRegister(this);
 }
-void IncreaseInterruptBudget::GenerateCode(MaglevAssembler* masm,
-                                           const ProcessingState& state) {
-  MaglevAssembler::ScratchRegisterScope temps(masm);
-  Register feedback_cell = temps.Acquire();
-  Register budget = temps.Acquire().W();
-  __ Ldr(feedback_cell,
-         MemOperand(fp, StandardFrameConstants::kFunctionOffset));
-  __ LoadTaggedField(
-      feedback_cell,
-      FieldMemOperand(feedback_cell, JSFunction::kFeedbackCellOffset));
-  __ Ldr(budget,
-         FieldMemOperand(feedback_cell, FeedbackCell::kInterruptBudgetOffset));
-  __ Add(budget, budget, Immediate(amount()));
-  __ Str(budget,
-         FieldMemOperand(feedback_cell, FeedbackCell::kInterruptBudgetOffset));
+void HoleyFloat64ToMaybeNanFloat64::GenerateCode(MaglevAssembler* masm,
+                                                 const ProcessingState& state) {
+  // The hole value is a signalling NaN, so just silence it to get the float64
+  // value.
+  __ CanonicalizeNaN(ToDoubleRegister(result()), ToDoubleRegister(input()));
 }
 
 namespace {
@@ -1489,90 +1471,19 @@ void HandleInterruptsAndTiering(MaglevAssembler* masm, ZoneLabelRef done,
 
   // No pending interrupts. Call into the TieringManager if needed.
   {
-    // Skip the runtime call if the tiering state is kInProgress. The runtime
-    // only performs simple bookkeeping in this case, which we can easily
-    // replicate here in generated code.
-    // TODO(jgruber): Use the correct feedback vector once Maglev inlining is
-    // enabled.
-    Label update_profiler_ticks_and_interrupt_budget;
-    {
-      MaglevAssembler::ScratchRegisterScope temps(masm);
-      Register scratch1 = temps.Acquire();
-      static_assert(kTieringStateInProgressBlocksTierup);
-      __ Move(scratch0, masm->compilation_info()
-                            ->toplevel_compilation_unit()
-                            ->feedback()
-                            .object());
-
-      // If tiering_state is kInProgress, skip the runtime call.
-      __ Ldrh(scratch1.W(),
-              FieldMemOperand(scratch0, FeedbackVector::kFlagsOffset));
-      __ DecodeField<FeedbackVector::TieringStateBits>(scratch1);
-      __ Cmp(scratch1.W(),
-             Immediate(static_cast<int>(TieringState::kInProgress)));
-      __ B(&update_profiler_ticks_and_interrupt_budget, eq);
-
-      // If osr_tiering_state is kInProgress, skip the runtime call.
-      __ Ldrh(scratch1.W(),
-              FieldMemOperand(scratch0, FeedbackVector::kFlagsOffset));
-      __ DecodeField<FeedbackVector::OsrTieringStateBit>(scratch1);
-      __ Cmp(scratch1.W(),
-             Immediate(static_cast<int>(TieringState::kInProgress)));
-      __ B(&update_profiler_ticks_and_interrupt_budget, eq);
-    }
-
-    {
-      SaveRegisterStateForCall save_register_state(masm,
-                                                   node->register_snapshot());
-      Register function = scratch0;
-      __ Ldr(function, MemOperand(fp, StandardFrameConstants::kFunctionOffset));
-      __ Push(function);
-      // Move into kContextRegister after the load into scratch0, just in case
-      // scratch0 happens to be kContextRegister.
-      __ Move(kContextRegister, masm->native_context().object());
-      // Note: must not cause a lazy deopt!
-      __ CallRuntime(Runtime::kBytecodeBudgetInterrupt_Maglev, 1);
-      save_register_state.DefineSafepoint();
-    }
-    __ B(*done);
-
-    __ Bind(&update_profiler_ticks_and_interrupt_budget);
-    {
-      MaglevAssembler::ScratchRegisterScope temps(masm);
-      Register feedback_vector = scratch0;
-      Register ticks = temps.Acquire().W();
-      // We are skipping the call to Runtime::kBytecodeBudgetInterrupt_Maglev
-      // since the tiering state is kInProgress. Perform bookkeeping that would
-      // have been done in the runtime function:
-      __ AssertFeedbackVector(feedback_vector);
-      // FeedbackVector::SaturatingIncrementProfilerTicks.
-      // TODO(jgruber): This isn't saturating and thus we may theoretically
-      // exceed Smi::kMaxValue. But, 1) this is very unlikely since it'd take
-      // quite some time to exhaust the budget that many times; and 2) even an
-      // overflow doesn't hurt us at all.
-      __ Ldr(ticks, FieldMemOperand(feedback_vector,
-                                    FeedbackVector::kProfilerTicksOffset));
-      __ Add(ticks, ticks, Immediate(1));
-      __ Str(ticks, FieldMemOperand(feedback_vector,
-                                    FeedbackVector::kProfilerTicksOffset));
-    }
-
-    // JSFunction::SetInterruptBudget.
-    {
-      MaglevAssembler::ScratchRegisterScope temps(masm);
-      Register feedback_cell = scratch0;
-      Register budget = temps.Acquire().W();
-      __ Ldr(feedback_cell,
-             MemOperand(fp, StandardFrameConstants::kFunctionOffset));
-      __ LoadTaggedField(
-          feedback_cell,
-          FieldMemOperand(feedback_cell, JSFunction::kFeedbackCellOffset));
-      __ Move(budget, v8_flags.interrupt_budget);
-      __ Str(budget, FieldMemOperand(feedback_cell,
-                                     FeedbackCell::kInterruptBudgetOffset));
-    }
-    __ B(*done);
+    SaveRegisterStateForCall save_register_state(masm,
+                                                 node->register_snapshot());
+    Register function = scratch0;
+    __ Ldr(function, MemOperand(fp, StandardFrameConstants::kFunctionOffset));
+    __ Push(function);
+    // Move into kContextRegister after the load into scratch0, just in case
+    // scratch0 happens to be kContextRegister.
+    __ Move(kContextRegister, masm->native_context().object());
+    // Note: must not cause a lazy deopt!
+    __ CallRuntime(Runtime::kBytecodeBudgetInterrupt_Maglev, 1);
+    save_register_state.DefineSafepoint();
   }
+  __ B(*done);
 }
 
 void GenerateReduceInterruptBudget(MaglevAssembler* masm, Node* node,
@@ -1794,50 +1705,6 @@ DEF_STORE_TYPED_ARRAY(StoreDoubleTypedArrayElementNoDeopt, DoubleRegister,
                       ToDoubleRegister, /*check_detached*/ false)
 
 #undef DEF_STORE_TYPED_ARRAY
-
-void LoadFixedArrayElement::SetValueLocationConstraints() {
-  UseRegister(elements_input());
-  UseRegister(index_input());
-  DefineAsRegister(this);
-}
-void LoadFixedArrayElement::GenerateCode(MaglevAssembler* masm,
-                                         const ProcessingState& state) {
-  Register elements = ToRegister(elements_input());
-  Register index = ToRegister(index_input());
-  if (v8_flags.debug_code) {
-    __ AssertNotSmi(elements);
-    __ IsObjectType(elements, FIXED_ARRAY_TYPE);
-    __ Assert(eq, AbortReason::kUnexpectedValue);
-  }
-  Register result_reg = ToRegister(result());
-  __ Add(result_reg, elements, Operand(index, LSL, kTaggedSizeLog2));
-  if (this->decompresses_tagged_result()) {
-    __ DecompressTagged(result_reg,
-                        FieldMemOperand(result_reg, FixedArray::kHeaderSize));
-  } else {
-    __ Ldr(result_reg.W(),
-           FieldMemOperand(result_reg, FixedArray::kHeaderSize));
-  }
-}
-
-void LoadFixedDoubleArrayElement::SetValueLocationConstraints() {
-  UseAndClobberRegister(elements_input());
-  UseRegister(index_input());
-  DefineAsRegister(this);
-}
-void LoadFixedDoubleArrayElement::GenerateCode(MaglevAssembler* masm,
-                                               const ProcessingState& state) {
-  Register elements = ToRegister(elements_input());
-  Register index = ToRegister(index_input());
-  if (v8_flags.debug_code) {
-    __ AssertNotSmi(elements);
-    __ IsObjectType(elements, FIXED_DOUBLE_ARRAY_TYPE);
-    __ Assert(eq, AbortReason::kUnexpectedValue);
-  }
-  __ Add(elements, elements, Operand(index, LSL, kDoubleSizeLog2));
-  __ Ldr(ToDoubleRegister(result()),
-         FieldMemOperand(elements, FixedArray::kHeaderSize));
-}
 
 void StoreFixedDoubleArrayElement::SetValueLocationConstraints() {
   UseRegister(elements_input());
@@ -2279,24 +2146,6 @@ void Return::GenerateCode(MaglevAssembler* masm, const ProcessingState& state) {
   // Drop receiver + arguments according to dynamic arguments size.
   __ DropArguments(params_size, MacroAssembler::kCountIncludesReceiver);
   __ Ret();
-}
-
-void BranchIfFloat64Compare::SetValueLocationConstraints() {
-  UseRegister(left_input());
-  UseRegister(right_input());
-}
-void BranchIfFloat64Compare::GenerateCode(MaglevAssembler* masm,
-                                          const ProcessingState& state) {
-  DoubleRegister left = ToDoubleRegister(left_input());
-  DoubleRegister right = ToDoubleRegister(right_input());
-  __ Fcmp(left, right);
-  if (jump_mode_if_nan_ == JumpModeIfNaN::kJumpToTrue) {
-    __ JumpIf(vs, if_true()->label());
-  } else {
-    __ JumpIf(vs, if_false()->label());
-  }
-  __ Branch(ConditionFor(operation_), if_true(), if_false(),
-            state.next_block());
 }
 
 }  // namespace maglev

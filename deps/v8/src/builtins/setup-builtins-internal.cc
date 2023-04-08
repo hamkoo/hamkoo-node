@@ -102,9 +102,6 @@ Code BuildWithMacroAssembler(Isolate* isolate, Builtin builtin,
                              MacroAssemblerGenerator generator,
                              const char* s_name) {
   HandleScope scope(isolate);
-  // Canonicalize handles, so that we can share constant pool entries pointing
-  // to code targets without dereferencing their handles.
-  CanonicalHandleScope canonical(isolate);
   byte buffer[kBufferSize];
 
   MacroAssembler masm(isolate, BuiltinAssemblerOptions(isolate, builtin),
@@ -144,9 +141,6 @@ Code BuildWithMacroAssembler(Isolate* isolate, Builtin builtin,
 Code BuildAdaptor(Isolate* isolate, Builtin builtin, Address builtin_address,
                   const char* name) {
   HandleScope scope(isolate);
-  // Canonicalize handles, so that we can share constant pool entries pointing
-  // to code targets without dereferencing their handles.
-  CanonicalHandleScope canonical(isolate);
   byte buffer[kBufferSize];
   MacroAssembler masm(isolate, BuiltinAssemblerOptions(isolate, builtin),
                       CodeObjectRequired::kYes,
@@ -168,9 +162,6 @@ Code BuildWithCodeStubAssemblerJS(Isolate* isolate, Builtin builtin,
                                   CodeAssemblerGenerator generator, int argc,
                                   const char* name) {
   HandleScope scope(isolate);
-  // Canonicalize handles, so that we can share constant pool entries pointing
-  // to code targets without dereferencing their handles.
-  CanonicalHandleScope canonical(isolate);
 
   Zone zone(isolate->allocator(), ZONE_NAME, kCompressGraphZone);
   compiler::CodeAssemblerState state(isolate, &zone, argc, CodeKind::BUILTIN,
@@ -188,9 +179,6 @@ Code BuildWithCodeStubAssemblerCS(Isolate* isolate, Builtin builtin,
                                   CallDescriptors::Key interface_descriptor,
                                   const char* name) {
   HandleScope scope(isolate);
-  // Canonicalize handles, so that we can share constant pool entries pointing
-  // to code targets without dereferencing their handles.
-  CanonicalHandleScope canonical(isolate);
   Zone zone(isolate->allocator(), ZONE_NAME, kCompressGraphZone);
   // The interface descriptor with given key must be initialized at this point
   // and this construction just queries the details from the descriptors table.
@@ -256,7 +244,7 @@ void SetupIsolateDelegate::ReplacePlaceholders(Isolate* isolate) {
             Builtins::IsIsolateIndependent(target_code.builtin_id()));
         if (!target_code.is_builtin()) continue;
         Code new_target = builtins->code(target_code.builtin_id());
-        rinfo->set_target_address(new_target.InstructionStart(),
+        rinfo->set_target_address(new_target.instruction_start(),
                                   UPDATE_WRITE_BARRIER, SKIP_ICACHE_FLUSH);
       } else {
         DCHECK(RelocInfo::IsEmbeddedObjectMode(rinfo->rmode()));
@@ -271,7 +259,7 @@ void SetupIsolateDelegate::ReplacePlaceholders(Isolate* isolate) {
       flush_icache = true;
     }
     if (flush_icache) {
-      FlushInstructionCache(code.InstructionStart(), code.instruction_size());
+      FlushInstructionCache(code.instruction_start(), code.instruction_size());
     }
   }
 }
@@ -363,12 +351,6 @@ void SetupIsolateDelegate::SetupBuiltinsInternal(Isolate* isolate) {
   CHECK_EQ(Builtins::kBuiltinCount, index);
 
   ReplacePlaceholders(isolate);
-
-#define SET_PROMISE_REJECTION_PREDICTION(Name) \
-  builtins->code(Builtin::k##Name).set_is_promise_rejection(true);
-
-  BUILTIN_PROMISE_REJECTION_PREDICTION_LIST(SET_PROMISE_REJECTION_PREDICTION)
-#undef SET_PROMISE_REJECTION_PREDICTION
 
   builtins->MarkInitialized();
 }

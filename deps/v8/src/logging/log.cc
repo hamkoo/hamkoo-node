@@ -915,7 +915,7 @@ void JitLogger::CodeMoveEvent(InstructionStream from, InstructionStream to) {
   event.type = JitCodeEvent::CODE_MOVED;
   event.code_type = JitCodeEvent::JIT_CODE;
   event.code_start = reinterpret_cast<void*>(from.instruction_start());
-  event.code_len = from.unchecked_code().instruction_size();
+  event.code_len = from.unchecked_code(kAcquireLoad).instruction_size();
   event.new_code_start = reinterpret_cast<void*>(to.instruction_start());
   event.isolate = reinterpret_cast<v8::Isolate*>(isolate_);
 
@@ -1496,7 +1496,6 @@ void V8FileLogger::FeedbackVectorEvent(FeedbackVector vector,
   msg << kNext << vector.maybe_has_maglev_code();
   msg << kNext << vector.maybe_has_turbofan_code();
   msg << kNext << vector.invocation_count();
-  msg << kNext << vector.profiler_ticks() << kNext;
 
 #ifdef OBJECT_PRINT
   std::ostringstream buffer;
@@ -1627,8 +1626,9 @@ void V8FileLogger::CodeDisableOptEvent(Handle<AbstractCode> code,
 void V8FileLogger::ProcessDeoptEvent(Handle<Code> code, SourcePosition position,
                                      const char* kind, const char* reason) {
   MSG_BUILDER();
-  msg << Event::kCodeDeopt << kNext << Time() << kNext << code->CodeSize()
-      << kNext << reinterpret_cast<void*>(code->InstructionStart());
+  msg << Event::kCodeDeopt << kNext << Time() << kNext
+      << code->InstructionStreamObjectSize() << kNext
+      << reinterpret_cast<void*>(code->instruction_start());
 
   std::ostringstream deopt_location;
   int inlining_id = -1;

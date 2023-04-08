@@ -507,6 +507,8 @@ let kExprArrayNew = 0x1b;
 let kExprArrayNewDefault = 0x1c;
 let kExprArrayNewData = 0x1d;
 let kExprArrayNewElem = 0x1f;
+let kExprArrayInitData = 0x54;
+let kExprArrayInitElem = 0x55;
 let kExprArrayFill = 0x0f;
 let kExprI31New = 0x20;
 let kExprI31GetS = 0x21;
@@ -522,6 +524,7 @@ let kExprBrOnCastNull = 0x4a;
 let kExprBrOnCastDeprecated = 0x46;
 let kExprBrOnCastFail = 0x43;
 let kExprBrOnCastFailNull = 0x4b;
+let kExprBrOnCastGeneric = 0x4f;
 let kExprRefCastNop = 0x4c;
 let kExprRefIsData = 0x51;
 let kExprRefIsI31 = 0x52;
@@ -1539,6 +1542,7 @@ class WasmModuleBuilder {
     return this;
   }
 
+  // TODO(manoskouk): Refactor this to use initializer expression for {addr}.
   addDataSegment(addr, data, is_global = false) {
     this.data_segments.push(
         {addr: addr, data: data, is_global: is_global, is_active: true});
@@ -2101,6 +2105,7 @@ class WasmModuleBuilder {
 }
 
 function wasmSignedLeb(val, max_len = 5) {
+  if (val == null) throw new Error("Leb value many not be null/undefined");
   let res = [];
   for (let i = 0; i < max_len; ++i) {
     let v = val & 0x7f;
@@ -2117,6 +2122,7 @@ function wasmSignedLeb(val, max_len = 5) {
 }
 
 function wasmSignedLeb64(val, max_len) {
+  if (val == null) throw new Error("Leb value many not be null/undefined");
   if (typeof val != "bigint") {
     if (val < Math.pow(2, 31)) {
       return wasmSignedLeb(val, max_len);
@@ -2139,6 +2145,7 @@ function wasmSignedLeb64(val, max_len) {
 }
 
 function wasmUnsignedLeb(val, max_len = 5) {
+  if (val == null) throw new Error("Leb value many not be null/undefined");
   let res = [];
   for (let i = 0; i < max_len; ++i) {
     let v = val & 0x7f;
@@ -2203,6 +2210,26 @@ function wasmS128Const(f) {
   }
   return result;
 }
+
+let [wasmBrOnCast, wasmBrOnCastFail] = (function() {
+  return [
+    (labelIdx, sourceType, targetType) =>
+      wasmBrOnCastImpl(labelIdx, sourceType, targetType, false),
+      (labelIdx, sourceType, targetType) =>
+      wasmBrOnCastImpl(labelIdx, sourceType, targetType, true),
+  ];
+  function wasmBrOnCastImpl(labelIdx, sourceType, targetType, brOnFail) {
+    labelIdx = wasmUnsignedLeb(labelIdx, kMaxVarInt32Size);
+    let srcHeap = wasmSignedLeb(sourceType.heap_type, kMaxVarInt32Size);
+    let tgtHeap = wasmSignedLeb(targetType.heap_type, kMaxVarInt32Size);
+    let srcIsNullable = sourceType.opcode == kWasmRefNull;
+    let tgtIsNullable = targetType.opcode == kWasmRefNull;
+    flags = (brOnFail << 2) + (tgtIsNullable << 1) + srcIsNullable;
+    return [
+      kGCPrefix, kExprBrOnCastGeneric,
+      flags, ...labelIdx, ...srcHeap, ...tgtHeap];
+  }
+})();
 
 function getOpcodeName(opcode) {
   return globalThis.kWasmOpcodeNames?.[opcode] ?? 'unknown';
